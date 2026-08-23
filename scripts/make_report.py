@@ -48,7 +48,7 @@ STYLES = {
     "consulting": {
         "desc": "咨询公司。深海军蓝，每张图编号 Exhibit N，图题即结论。战略分析、框架评估、董事会材料",
         "bg": "#FFFFFF", "fg": "#051C2C", "muted": "#5A6E7C",
-        "rule": "#D6DEE4", "card": "#F4F7F9", "accent": "#2251FF",
+        "rule": "#CBD5DD", "card": "#E7EEF2", "accent": "#2251FF",
         "pos": "#00806A", "neg": "#C1372B",
         "h_font": SANS, "b_font": SANS,
         "exhibit": True,
@@ -68,12 +68,12 @@ th{text-transform:uppercase;letter-spacing:.05em;font-size:11.5px}
     "bank": {
         "desc": "投行研究报告。深蓝、高信息密度、等宽数字、细密分隔线。财务建模、估值、对账、尽调",
         "bg": "#FFFFFF", "fg": "#0B1F3A", "muted": "#63748A",
-        "rule": "#D3DAE3", "card": "#F5F7FA", "accent": "#0B4F8C",
+        "rule": "#CED5E0", "card": "#E8ECF3", "accent": "#0B4F8C",
         "pos": "#0F6B3D", "neg": "#A01B22",
         "h_font": SANS, "b_font": SANS,
         "extra_css": """
 body{font-size:15px;line-height:1.65}
-.wrap{max-width:920px}
+.wrap{max-width:1180px}
 h1{font-size:26px;font-weight:700}
 h2{font-size:17px;margin:38px 0 10px;text-transform:none;
 border-bottom:2px solid %(fg)s;padding-bottom:6px}
@@ -89,11 +89,11 @@ tbody tr:nth-child(even){background:%(card)s}
     "editorial": {
         "desc": "财经媒体。三文鱼粉底、衬线标题、窄栏叙事。行业观察、深度解读、有观点的报告",
         "bg": "#FFF1E5", "fg": "#33302E", "muted": "#66605C",
-        "rule": "#E6D9CB", "card": "#FFFAF5", "accent": "#0F5499",
+        "rule": "#D9C4AC", "card": "#FFF9F1", "accent": "#0F5499",
         "pos": "#0D7680", "neg": "#CC0000",
         "h_font": SERIF, "b_font": SANS,
         "extra_css": """
-.wrap{max-width:760px}
+.wrap{max-width:900px}
 h1{font-size:34px;line-height:1.28}
 h2{font-family:%(h_font)s;border-bottom:0;font-size:22px;
 margin:48px 0 12px}
@@ -107,11 +107,11 @@ font-family:%(h_font)s;font-size:18px}
     "magazine": {
         "desc": "杂志式。白底红标块、紧凑排版、editorial 标题。观点报告、行业洞察、有立场的分析",
         "bg": "#FFFFFF", "fg": "#121212", "muted": "#6E6E6E",
-        "rule": "#E0E0E0", "card": "#F6F6F6", "accent": "#E3120B",
+        "rule": "#D5D5D5", "card": "#ECECEC", "accent": "#E3120B",
         "pos": "#0B7A3B", "neg": "#E3120B",
         "h_font": SANS, "b_font": SANS,
         "extra_css": """
-.wrap{max-width:740px}
+.wrap{max-width:880px}
 h1{font-size:29px;line-height:1.3;font-weight:700}
 h1::before{content:"";display:block;width:52px;height:7px;
 background:%(accent)s;margin-bottom:15px}
@@ -127,12 +127,12 @@ body{font-size:15.5px}
     },
     "product": {
         "desc": "科技公司。大留白、圆角卡片、克制的紫蓝强调。产品复盘、增长分析、内部评审",
-        "bg": "#FFFFFF", "fg": "#0A2540", "muted": "#6B7C93",
-        "rule": "#E6EBF1", "card": "#F6F9FC", "accent": "#635BFF",
+        "bg": "#FFFFFF", "fg": "#0A2540", "muted": "#66768C",
+        "rule": "#CBD5E2", "card": "#E7EFF7", "accent": "#635BFF",
         "pos": "#09825D", "neg": "#CD3D64",
         "h_font": SANS, "b_font": SANS,
         "extra_css": """
-.wrap{max-width:840px;padding-top:72px}
+.wrap{max-width:1000px;padding-top:72px}
 h1{font-size:33px;letter-spacing:-.025em;font-weight:700}
 h2{border-bottom:0;font-size:21px;margin:56px 0 12px;letter-spacing:-.015em}
 .kpi{border-radius:12px;border-color:%(rule)s;background:%(card)s;padding:18px 20px}
@@ -146,12 +146,12 @@ table{font-size:14.5px}
     },
     "minimal": {
         "desc": "极简。大量留白、无装饰。内部快看、单一结论、只想把数说清楚",
-        "bg": "#FFFFFF", "fg": "#000000", "muted": "#767676",
-        "rule": "#EAEAEA", "card": "#FAFAFA", "accent": "#000000",
+        "bg": "#FFFFFF", "fg": "#000000", "muted": "#757575",
+        "rule": "#D5D5D5", "card": "#EDEDED", "accent": "#000000",
         "pos": "#1F6F3F", "neg": "#95291F",
         "h_font": SANS, "b_font": SANS,
         "extra_css": """
-.wrap{max-width:720px}
+.wrap{max-width:860px}
 h2{border-bottom:0;font-size:18px;margin:48px 0 10px}
 .lede{background:transparent;border-left:2px solid %(fg)s}
 .kpi{border:0;background:transparent;padding:0 20px 0 0}
@@ -214,6 +214,56 @@ def _fmt(v: float) -> str:
     return f"{v:,.2f}"
 
 
+def _decimals(values: list) -> int:
+    """一组数里最多用到几位小数（上限 2）。"""
+    d = 0
+    for v in values:
+        if not isinstance(v, (int, float)) or isinstance(v, bool):
+            continue
+        if v != v or v in (float("inf"), float("-inf")):   # NaN / inf
+            continue
+        for k in (0, 1, 2):
+            if round(float(v), k) == float(v):
+                d = max(d, k)
+                break
+        else:
+            d = 2
+    return d
+
+
+def fmt_column(values: list) -> "callable":
+    """给一整列返回统一的格式化函数。
+
+    逐个格式化会让同一列里出现 `0.90` 和 `0`、`313.80` 和 `75` 并排——
+    读者要在每一行重新判断小数点在哪。同列同格式是最基本的表格素养。
+
+    表格里不做万/亿缩写：表是拿来核数的，缩写会丢精度。
+    """
+    d = _decimals(values)
+    def f(v):
+        if v is None or not isinstance(v, (int, float)) or isinstance(v, bool):
+            return "—" if v is None else str(v)
+        return f"{v:,.{d}f}"
+    return f
+
+
+def fmt_axis(step: float) -> "callable":
+    """坐标轴刻度的统一格式化。
+
+    刻度由 step 决定小数位，否则会出现 `4.50 / 4 / 3.50 / 3` 这种
+    同一根轴上格式跳来跳去的情况。
+    """
+    d = _decimals([step])
+    def f(v):
+        a = abs(v)
+        if a >= 1e8:
+            return f"{v/1e8:,.2f}亿"
+        if a >= 1e4:
+            return f"{v/1e4:,.1f}万"
+        return f"{v:,.{d}f}"
+    return f
+
+
 # ── SVG 图表：自己画，不依赖任何库 ──────────────────────────────────
 def svg_bar(labels: list[str], values: list[float], st: dict,
             highlight: int | None = None) -> str:
@@ -252,6 +302,7 @@ def svg_bar(labels: list[str], values: list[float], st: dict,
     span = (vmax - vmin) or 1
     zero_x = pad_l + (0 - vmin) / span * plot_w
 
+    barf = fmt_column([v for v in values if v is not None])
     parts = [f'<svg viewBox="0 0 {w} {h}" width="100%" '
              f'preserveAspectRatio="xMidYMid meet" role="img">']
     for i, (lab, disp, val) in enumerate(zip(labels, shown, values)):
@@ -272,7 +323,7 @@ def svg_bar(labels: list[str], values: list[float], st: dict,
         # 直接标注数值，不用图例也不用坐标轴刻度
         parts.append(
             f'<text x="{x2 + 8:.1f}" y="{y + row_h*0.68:.0f}" font-size="13" '
-            f'font-variant-numeric="tabular-nums" fill="{st["muted"]}">{_fmt(val)}</text>')
+            f'font-variant-numeric="tabular-nums" fill="{st["muted"]}">{barf(val)}</text>')
     if vmin < 0:
         parts.append(f'<line x1="{zero_x:.1f}" y1="{pad_t-4}" x2="{zero_x:.1f}" '
                      f'y2="{h-pad_t+4}" stroke="{st["rule"]}" stroke-width="1"/>')
@@ -309,6 +360,7 @@ def svg_line(labels: list[str], series: list[dict], st: dict,
     parts = [f'<svg viewBox="0 0 {w} {h}" width="100%" '
              f'preserveAspectRatio="xMidYMid meet" role="img">']
     # 极淡的水平参考线，落在整刻度上
+    axf = fmt_axis(step)
     val = lo
     while val <= hi + step * 0.001:
         y = Y(val)
@@ -316,7 +368,7 @@ def svg_line(labels: list[str], series: list[dict], st: dict,
                      f'stroke="{st["rule"]}" stroke-width="1"/>')
         parts.append(f'<text x="{pad_l-8}" y="{y+4:.1f}" text-anchor="end" '
                      f'font-size="11" fill="{st["muted"]}" '
-                     f'font-variant-numeric="tabular-nums">{_fmt(val)}</text>')
+                     f'font-variant-numeric="tabular-nums">{axf(val)}</text>')
         val += step
 
     for si, s in enumerate(series):
@@ -402,12 +454,19 @@ def render_table(tb: dict, st: dict) -> str:
         out.append(f'<caption>{E(tb["caption"])}</caption>')
     out.append("<thead><tr>" + "".join(f"<th>{E(str(c))}</th>" for c in cols)
                + "</tr></thead><tbody>")
+    # 每列独立算一次格式：同列同小数位，读者不用逐行重新找小数点
+    ncol = max((len(r) for r in rows), default=0)
+    colfmt = []
+    for j in range(ncol):
+        col = [r[j] for r in rows if j < len(r)]
+        nums = [v for v in col if isinstance(v, (int, float)) and not isinstance(v, bool)]
+        colfmt.append(fmt_column(nums) if nums else None)
     for r in rows:
         cells = []
-        for v in r:
+        for j, v in enumerate(r):
             num = isinstance(v, (int, float)) and not isinstance(v, bool)
-            cells.append(f'<td class="{"num" if num else ""}">'
-                         f'{_fmt(v) if num else E(str(v))}</td>')
+            txt = colfmt[j](v) if (num and j < len(colfmt) and colfmt[j]) else E(str(v))
+            cells.append(f'<td class="{"num" if num else ""}">{txt}</td>')
         out.append("<tr>" + "".join(cells) + "</tr>")
     out.append("</tbody></table></div>")
     return "".join(out)
@@ -417,7 +476,7 @@ CSS = """
 *{box-sizing:border-box}
 body{margin:0;background:%(bg)s;color:%(fg)s;font-family:%(b_font)s;
 line-height:1.75;font-size:16px;-webkit-font-smoothing:antialiased}
-.wrap{max-width:860px;margin:0 auto;padding:56px 28px 96px}
+.wrap{max-width:1040px;margin:0 auto;padding:56px 32px 96px}
 h1{font-family:%(h_font)s;font-size:31px;line-height:1.35;margin:0 0 10px;
 font-weight:700;letter-spacing:-.01em}
 h2{font-family:%(h_font)s;font-size:20px;margin:52px 0 14px;font-weight:700;
@@ -1089,6 +1148,59 @@ def build_docx(spec: dict, out: Path) -> str:
     return "六页纸叙述体文档，图表数据进附录"
 
 
+def audit_spec(spec: dict) -> list[str]:
+    """产出前自检：哪些地方本该是图，却写成了字或摆成了表。
+
+    这些都是机器能判的客观量——字数、图表数、表格的行列形状。
+    「这个洞察深不深」机器判不了，但「这一屏全是字」它判得了。
+    """
+    tips: list[str] = []
+    text_len = 0
+    charts = 0
+    tables: list[dict] = []
+    for sec in spec.get("sections", []):
+        text_len += len(sec.get("heading", "")) + len(sec.get("body", ""))
+        for sub in sec.get("subsections", []):
+            text_len += len(sub.get("body", ""))
+        charts += len(sec.get("charts") or ([1] if sec.get("chart") else []))
+        tables += (sec.get("tables") or ([sec["table"]] if sec.get("table") else []))
+    text_len += sum(len(s) for s in (spec.get("summary") or []))
+
+    # 一张图约顶 800 字。差得太远说明该看的东西都埋在段落里了。
+    if text_len > 1500 and charts < text_len / 800:
+        want = int(text_len / 800)
+        tips.append(
+            f"正文约 {text_len} 字，只有 {charts} 张图。这个密度读者会跳着看。"
+            f"按一张图顶 800 字算，至少该有 {want} 张。"
+            f"回去找：哪几段其实在描述一个趋势、一个排名、或一个构成？那些都该是图。")
+
+    for i, tb in enumerate(tables, 1):
+        rows = tb.get("rows") or []
+        cols = tb.get("columns") or []
+        if len(rows) < 5 or not cols:
+            continue
+        numeric_cols = 0
+        for j in range(len(cols)):
+            vals = [r[j] for r in rows if j < len(r)]
+            if vals and all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                            for v in vals):
+                numeric_cols += 1
+        cap = tb.get("caption") or f"第 {i} 个表"
+        if numeric_cols == 1:
+            tips.append(
+                f"「{cap}」{len(rows)} 行 × 1 个数值列 —— 这是排名，画成条形图读者"
+                f"一眼能看出差距。表格适合「要查具体数值」，不适合「要看谁高谁低」。")
+        elif numeric_cols >= 1 and len(rows) >= 8:
+            has_neg = any(isinstance(v, (int, float)) and v < 0
+                          for r in rows for v in r
+                          if isinstance(v, (int, float)) and not isinstance(v, bool))
+            if has_neg:
+                tips.append(
+                    f"「{cap}」{len(rows)} 行且含正负值 —— 如果它在解释「总量为什么"
+                    f"变了」，瀑布图（`type: waterfall`）比表格清楚一个数量级。")
+    return tips
+
+
 TEMPLATE = {
     "title": "标题写结论，不写主题（「华东贡献六成销售额但增速垫底」而不是「销售额分析」）",
     "subtitle": "数据范围 / 制表日期",
@@ -1210,6 +1322,8 @@ def main() -> None:
         missing.append("summary（结论先行）—— 读者不该自己去找结论")
     for m in missing:
         print(f"  ⚠ 缺 {m}")
+    for t in audit_spec(spec):
+        print(f"  → {t}")
 
 
 if __name__ == "__main__":
