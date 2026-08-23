@@ -195,8 +195,9 @@ def nice_scale(lo: float, hi: float, ticks: int = 4) -> tuple[float, float, floa
     import math
     if hi <= lo:
         hi, lo = lo + 1, lo - 1
-    span = _nice_num(hi - lo, False)
-    step = _nice_num(span / max(ticks - 1, 1), True)
+    # 直接由真实跨度算 step。先把 span 收整一次再除，等于向上取整叠加两次，
+    # 实测能把轴撑到数据跨度的 2 倍以上，数据被压成中间一条窄带。
+    step = _nice_num((hi - lo) / max(ticks - 1, 1), True)
     return math.floor(lo / step) * step, math.ceil(hi / step) * step, step
 
 
@@ -221,9 +222,29 @@ def svg_bar(labels: list[str], values: list[float], st: dict,
     if not values:
         return ""
     n = len(values)
-    row_h, gap, pad_l, pad_r, pad_t = 30, 8, 130, 90, 8
+    row_h, gap, pad_r, pad_t = 30, 8, 90, 8
+
+    # 左边距按最长标签算，不能写死：写死 130 时「豆包手搓」这种标签
+    # 会被 viewBox 左边界裁掉首字，而且裁掉的部分不会有任何报错。
+    # 中文字符宽度约等于字号，西文数字约 0.55 倍。
+    def _label_w(s: str, size: float = 13.0) -> float:
+        wide = sum(1 for c in s if ord(c) > 0x2E80)
+        return wide * size + (len(s) - wide) * size * 0.55
+
+    LABEL_MAX = 190.0
+    labels = [str(x) for x in labels]
+    shown = []
+    for lab in labels:
+        if _label_w(lab) <= LABEL_MAX:
+            shown.append(lab)
+            continue
+        cut = lab                      # 超长的截断，但保留完整值给 <title>
+        while cut and _label_w(cut + "…") > LABEL_MAX:
+            cut = cut[:-1]
+        shown.append(cut + "…")
+    pad_l = min(max(max((_label_w(s) for s in shown), default=0) + 16, 90.0), LABEL_MAX + 16)
+    w = pad_l + 420 + pad_r            # 条形区至少留 420，总宽随标签伸缩
     h = pad_t * 2 + n * row_h + (n - 1) * gap
-    w = 720
     plot_w = w - pad_l - pad_r
     # 基线从 0：条形编码长度，截断即失真
     vmax = max(max(values), 0)
@@ -233,7 +254,7 @@ def svg_bar(labels: list[str], values: list[float], st: dict,
 
     parts = [f'<svg viewBox="0 0 {w} {h}" width="100%" '
              f'preserveAspectRatio="xMidYMid meet" role="img">']
-    for i, (lab, val) in enumerate(zip(labels, values)):
+    for i, (lab, disp, val) in enumerate(zip(labels, shown, values)):
         y = pad_t + i * (row_h + gap)
         x1 = pad_l + (min(val, 0) - vmin) / span * plot_w
         x2 = pad_l + (max(val, 0) - vmin) / span * plot_w
@@ -244,9 +265,10 @@ def svg_bar(labels: list[str], values: list[float], st: dict,
         parts.append(
             f'<rect x="{x1:.1f}" y="{y}" width="{bw:.1f}" height="{row_h}" '
             f'rx="2" fill="{color}" opacity="{op}"/>')
+        title = f'<title>{E(lab)}</title>' if disp != lab else ""
         parts.append(
-            f'<text x="{pad_l - 10}" y="{y + row_h*0.68:.0f}" text-anchor="end" '
-            f'font-size="13" fill="{st["fg"]}">{E(str(lab)[:12])}</text>')
+            f'<text x="{pad_l - 10:.0f}" y="{y + row_h*0.68:.0f}" text-anchor="end" '
+            f'font-size="13" fill="{st["fg"]}">{title}{E(disp)}</text>')
         # 直接标注数值，不用图例也不用坐标轴刻度
         parts.append(
             f'<text x="{x2 + 8:.1f}" y="{y + row_h*0.68:.0f}" font-size="13" '
@@ -272,6 +294,10 @@ def svg_line(labels: list[str], series: list[dict], st: dict,
     dlo, dhi = min(allv), max(allv)
     pad = (dhi - dlo) * 0.12 if dhi > dlo else max(abs(dhi) * 0.1, 1)
     lo, hi, step = nice_scale(dlo - pad, dhi + pad, ticks=4)
+    # 不强制从 0（见 nice_scale 的说明），但数据本身全非负时，轴下界不该跌破 0：
+    # 「阅读人数 -2万」这样的刻度是假的，且下方那段空白不携带任何波动信息。
+    if dlo >= 0 and lo < 0:
+        lo = 0.0
     n = len(labels)
 
     def X(i: int) -> float:
@@ -420,7 +446,8 @@ table{border-collapse:collapse;width:100%%;font-size:14px}
 caption{text-align:left;font-size:13px;color:%(muted)s;padding-bottom:8px}
 th,td{padding:8px 11px;border-bottom:1px solid %(rule)s;text-align:left}
 th{font-weight:600;font-size:13px;color:%(muted)s;
-border-bottom:1.5px solid %(rule)s}
+border-bottom:1.5px solid %(rule)s;white-space:nowrap}
+td:first-child{white-space:nowrap}
 td.num{text-align:right;font-variant-numeric:tabular-nums}
 tbody tr:hover{background:%(card)s}
 .caliber{background:%(card)s;border:1px solid %(rule)s;border-radius:8px;
@@ -534,6 +561,534 @@ def build_html(spec: dict) -> str:
 <body><div class="wrap">{''.join(body)}</div></body></html>"""
 
 
+# ── 形态二：HTML 幻灯片 ─────────────────────────────────────────────
+DECK_CSS = """
+*{box-sizing:border-box}
+html,body{margin:0;padding:0;background:#1B1D21;height:100%%;
+font-family:%(b_font)s;-webkit-font-smoothing:antialiased}
+.slide{width:100vw;height:100vh;display:none;padding:5.5vh 7vw;
+background:%(bg)s;color:%(fg)s;flex-direction:column;position:relative;
+container-type:size}
+.slide.on{display:flex}
+.stitle{font-family:%(h_font)s;font-size:clamp(22px,3.4vw,42px);
+line-height:1.28;font-weight:700;margin:0 0 2.6vh;letter-spacing:-.015em;
+max-width:80%%}
+.skicker{font-size:clamp(10px,1.05vw,13px);letter-spacing:.14em;
+text-transform:uppercase;color:%(accent)s;font-weight:700;margin-bottom:1.4vh}
+.sbody{flex:1;display:flex;gap:3.2vw;min-height:0}
+.scol{flex:1;min-width:0;display:flex;flex-direction:column;justify-content:center}
+.sbody .scol:first-child{flex:1.5}
+.scol svg{max-height:62vh}
+.spoints{list-style:none;margin:0;padding:0;font-size:clamp(13px,1.4vw,19px);
+line-height:1.65}
+.spoints li{margin:0 0 1.5vh;padding-left:1.1em;position:relative}
+.spoints li::before{content:"";position:absolute;left:0;top:.62em;
+width:.46em;height:.46em;background:%(accent)s;border-radius:50%%}
+.cover{justify-content:center;align-items:flex-start}
+.cover .stitle{font-size:clamp(30px,4.6vw,60px);max-width:88%%}
+.csub{font-size:clamp(12px,1.35vw,18px);color:%(muted)s;margin-top:1.8vh}
+.ckpis{display:flex;gap:3vw;margin-top:5vh;flex-wrap:wrap}
+.ckpi .k{font-size:clamp(10px,1vw,13px);color:%(muted)s}
+.ckpi .v{font-size:clamp(22px,3vw,40px);font-weight:700;
+font-variant-numeric:tabular-nums;letter-spacing:-.03em}
+.dl{display:grid;grid-template-columns:auto 1fr;gap:1.1vh 1.6vw;
+font-size:clamp(12px,1.25vw,17px);align-content:center}
+.dl dt{color:%(muted)s;white-space:nowrap}
+.dl dd{margin:0}
+table{border-collapse:collapse;width:100%%;font-size:clamp(11px,1.15vw,15px)}
+th,td{padding:.75vh 1vw;border-bottom:1px solid %(rule)s;text-align:left}
+th{color:%(muted)s;font-weight:600;white-space:nowrap}
+td.num{text-align:right;font-variant-numeric:tabular-nums}
+.pg{position:absolute;right:7vw;bottom:3.4vh;font-size:clamp(10px,1vw,13px);
+color:%(muted)s;font-variant-numeric:tabular-nums}
+.brand{position:absolute;left:7vw;bottom:3.4vh;font-size:clamp(10px,1vw,13px);
+color:%(muted)s}
+.hint{position:fixed;left:50%%;bottom:14px;transform:translateX(-50%%);
+font-size:11px;color:#8A8F98;background:rgba(0,0,0,.55);padding:4px 12px;
+border-radius:11px;transition:opacity .4s}
+.hint.gone{opacity:0}
+@media print{
+ @page{size:landscape;margin:0}
+ html,body{background:#fff}
+ .slide{display:flex!important;page-break-after:always;
+ width:100%%;height:100vh}
+ .hint{display:none}
+}
+"""
+
+DECK_JS = """
+(function(){
+ var s=[].slice.call(document.querySelectorAll('.slide')),i=0;
+ function go(n){i=Math.max(0,Math.min(s.length-1,n));
+  s.forEach(function(e,k){e.classList.toggle('on',k===i)});
+  location.hash='p'+(i+1);}
+ document.addEventListener('keydown',function(e){
+  if(['ArrowRight','PageDown',' ','Enter'].indexOf(e.key)>=0){e.preventDefault();go(i+1)}
+  if(['ArrowLeft','PageUp','Backspace'].indexOf(e.key)>=0){e.preventDefault();go(i-1)}
+  if(e.key==='Home')go(0); if(e.key==='End')go(s.length-1);
+ });
+ document.addEventListener('click',function(e){
+  if(e.target.closest('a'))return; go(e.clientX>innerWidth*0.35?i+1:i-1)});
+ var m=(location.hash||'').match(/p(\\d+)/); go(m?parseInt(m[1])-1:0);
+ var h=document.querySelector('.hint');
+ if(h)setTimeout(function(){h.classList.add('gone')},3200);
+})();
+"""
+
+
+def build_deck(spec: dict) -> str:
+    """HTML 幻灯片。每页一个 message title —— 页标题就是这一页的结论。
+
+    自包含，键盘/点击翻页，浏览器打印即得每页一张的 PDF。
+    """
+    st = resolve_style(spec)
+    slides: list[str] = []
+    n_body = 0
+
+    # 封面
+    kpis = spec.get("kpis") or []
+    cover = [f'<div class="slide cover on">']
+    cover.append(f'<h1 class="stitle">{E(spec.get("title", "数据分析"))}</h1>')
+    if spec.get("subtitle"):
+        cover.append(f'<div class="csub">{E(spec["subtitle"])}</div>')
+    if kpis:
+        cards = "".join(
+            f'<div class="ckpi"><div class="k">{E(str(k.get("label","")))}</div>'
+            f'<div class="v">{_fmt(k["value"]) if isinstance(k.get("value"), (int,float)) else E(str(k.get("value","")))}</div></div>'
+            for k in kpis[:4])
+        cover.append(f'<div class="ckpis">{cards}</div>')
+    cover.append("</div>")
+    slides.append("".join(cover))
+
+    # 结论页：summary 单独成页，因为它是整份东西的主论点
+    summary = spec.get("summary") or []
+    if summary:
+        n_body += 1
+        pts = "".join(f"<li>{E(s)}</li>" for s in summary)
+        slides.append(
+            f'<div class="slide"><div class="skicker">核心结论</div>'
+            f'<h2 class="stitle">看完这一页就够了</h2>'
+            f'<div class="sbody"><div class="scol">'
+            f'<ul class="spoints">{pts}</ul></div></div>'
+            f'<div class="pg">{n_body}</div></div>')
+
+    # 内容页：一节一页；一节有多张图就拆多页，一页只讲一件事
+    for sec in spec.get("sections", []):
+        charts = sec.get("charts") or ([sec["chart"]] if sec.get("chart") else [])
+        tables = sec.get("tables") or ([sec["table"]] if sec.get("table") else [])
+        paras = [p.strip() for p in (sec.get("body") or "").split("\n\n") if p.strip()]
+        blocks: list[tuple[str, Any]] = [("chart", c) for c in charts] \
+            + [("table", t) for t in tables]
+        if not blocks:
+            blocks = [("text", None)]
+        for bi, (kind, payload) in enumerate(blocks):
+            n_body += 1
+            head = E(sec.get("heading", ""))
+            if bi > 0:
+                head += "（续）"
+            left = ""
+            if kind == "chart":
+                left = render_chart(payload, st).replace('<figure class="chart">', '<div>') \
+                                               .replace("</figure>", "</div>")
+            elif kind == "table":
+                left = render_table(payload, st)
+            right = ""
+            if bi == 0 and paras:
+                right = ('<ul class="spoints">'
+                         + "".join(f"<li>{E(p)}</li>" for p in paras) + "</ul>")
+            body = f'<div class="scol">{left}</div>'
+            if right:
+                body += f'<div class="scol">{right}</div>'
+            slides.append(
+                f'<div class="slide"><h2 class="stitle">{head}</h2>'
+                f'<div class="sbody">{body}</div>'
+                f'<div class="pg">{n_body}</div></div>')
+
+    # 口径页
+    cal = spec.get("caliber") or {}
+    if cal:
+        n_body += 1
+        items = "".join(f"<dt>{E(str(k))}</dt><dd>{E(str(v))}</dd>" for k, v in cal.items())
+        slides.append(
+            f'<div class="slide"><div class="skicker">口径</div>'
+            f'<h2 class="stitle">这些数字是怎么算出来的</h2>'
+            f'<div class="sbody"><div class="scol"><dl class="dl">{items}</dl></div></div>'
+            f'<div class="pg">{n_body}</div></div>')
+
+    # 边界页
+    bounds = spec.get("boundaries") or []
+    if bounds:
+        n_body += 1
+        pts = "".join(f"<li>{E(b)}</li>" for b in bounds)
+        slides.append(
+            f'<div class="slide"><div class="skicker">边界</div>'
+            f'<h2 class="stitle">这份分析在哪里会失效</h2>'
+            f'<div class="sbody"><div class="scol">'
+            f'<ul class="spoints">{pts}</ul></div></div>'
+            f'<div class="pg">{n_body}</div></div>')
+
+    return f"""<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{E(spec.get('title', '数据分析'))}</title>
+<style>{DECK_CSS % st}{(st.get('extra_css') or '') % st}</style></head>
+<body>{''.join(slides)}
+<div class="hint">← → 翻页 ｜ 点击左右区域 ｜ 打印即得 PDF</div>
+<script>{DECK_JS}</script></body></html>"""
+
+
+# ── 形态三：Excel 内的报告 ──────────────────────────────────────────
+def build_xlsx(spec: dict, out: Path) -> str:
+    """把洞察写进 Excel：文字结论 + 原生图表 + 可下钻的数据表。
+
+    适合读者要在 Excel 里继续动手的场景——他能改数、能重排、能加自己的列，
+    图表跟着变。HTML 报告是死的，这个是活的。
+    """
+    try:
+        from openpyxl import Workbook
+        from openpyxl.chart import BarChart, LineChart, Reference
+        from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+        from openpyxl.utils import get_column_letter
+    except ImportError:
+        raise SystemExit("生成 xlsx 需要 openpyxl：pip install openpyxl")
+
+    st = resolve_style(spec)
+    accent = st["accent"].lstrip("#")
+    muted = st["muted"].lstrip("#")
+    fg = st["fg"].lstrip("#")
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "报告"
+    ws.sheet_view.showGridLines = False
+    ws.column_dimensions["A"].width = 2
+    ws.column_dimensions["B"].width = 96
+    r = 2
+
+    def put(text: str, size: int = 11, bold: bool = False, color: str = fg,
+            gap: int = 1, wrap: bool = True) -> None:
+        nonlocal r
+        c = ws.cell(row=r, column=2, value=text)
+        c.font = Font(size=size, bold=bold, color=color)
+        c.alignment = Alignment(wrap_text=wrap, vertical="top")
+        if wrap:
+            # 粗略估行高：按 46 个中文字一行
+            ws.row_dimensions[r].height = max(16, 15 * (len(text) // 46 + 1))
+        r += gap
+
+    put(spec.get("title", "数据分析报告"), size=18, bold=True, gap=1)
+    if spec.get("subtitle"):
+        put(spec["subtitle"], size=10, color=muted, gap=2)
+
+    kpis = spec.get("kpis") or []
+    if kpis:
+        for i, k in enumerate(kpis[:6]):
+            col = 2 + i
+            ws.cell(row=r, column=col, value=str(k.get("label", ""))).font = \
+                Font(size=9, color=muted)
+            v = k.get("value")
+            vc = ws.cell(row=r + 1, column=col,
+                         value=v if isinstance(v, (int, float)) else str(v))
+            vc.font = Font(size=16, bold=True, color=fg)
+            if isinstance(v, (int, float)):
+                vc.number_format = "#,##0.##"
+            if k.get("note"):
+                ws.cell(row=r + 2, column=col, value=str(k["note"])).font = \
+                    Font(size=9, color=muted)
+            if i:
+                ws.column_dimensions[get_column_letter(col)].width = 18
+        r += 4
+
+    summary = spec.get("summary") or []
+    if summary:
+        put("核心结论", size=13, bold=True, color=accent, gap=1)
+        for s in summary:
+            put("· " + s, size=11)
+        r += 1
+
+    cal = spec.get("caliber") or {}
+    if cal:
+        put("口径", size=13, bold=True, color=accent, gap=1)
+        for k, v in cal.items():
+            put(f"{k}：{v}", size=10, color=muted)
+        r += 1
+
+    # 数据表放独立 sheet，图表引用它 —— 这样用户改数图会跟着变
+    data_ws = wb.create_sheet("数据")
+    data_ws.sheet_view.showGridLines = False
+    drow = 1
+    chart_n = 0
+
+    for sec in spec.get("sections", []):
+        if sec.get("heading"):
+            put(sec["heading"], size=13, bold=True, gap=1)
+        for para in (sec.get("body") or "").split("\n\n"):
+            if para.strip():
+                put(para.strip(), size=11)
+
+        for ch in (sec.get("charts") or ([sec["chart"]] if sec.get("chart") else [])):
+            labels = [str(x) for x in ch.get("labels", [])]
+            if ch.get("type") == "line":
+                series = ch.get("series") or [{"name": ch.get("name", ""),
+                                               "values": ch.get("values", [])}]
+            else:
+                vals = ch.get("values", [])
+                pairs = list(zip(labels, vals))
+                if ch.get("sort", True):
+                    pairs.sort(key=lambda t: (t[1] is None, -(t[1] or 0)))
+                labels = [p[0] for p in pairs]
+                series = [{"name": ch.get("caption", "值"), "values": [p[1] for p in pairs]}]
+            if not labels:
+                continue
+            chart_n += 1
+            head_row = drow
+            data_ws.cell(row=drow, column=1, value=ch.get("caption", f"图{chart_n}")).font = \
+                Font(bold=True)
+            drow += 1
+            data_ws.cell(row=drow, column=1, value="类别").font = Font(size=9, color=muted)
+            for j, s in enumerate(series):
+                data_ws.cell(row=drow, column=2 + j, value=str(s.get("name", f"系列{j+1}"))) \
+                    .font = Font(size=9, color=muted)
+            first = drow
+            for i, lab in enumerate(labels):
+                data_ws.cell(row=drow + 1 + i, column=1, value=lab)
+                for j, s in enumerate(series):
+                    v = (s.get("values") or [None] * len(labels))[i] \
+                        if i < len(s.get("values") or []) else None
+                    data_ws.cell(row=drow + 1 + i, column=2 + j, value=v)
+            last = drow + len(labels)
+
+            c = LineChart() if ch.get("type") == "line" else BarChart()
+            if isinstance(c, BarChart):
+                c.type = "bar"
+                c.x_axis.scaling.min = 0     # 条形编码长度，基线必须为 0
+            c.add_data(Reference(data_ws, min_col=2, max_col=1 + len(series),
+                                 min_row=first, max_row=last), titles_from_data=True)
+            c.set_categories(Reference(data_ws, min_col=1, min_row=first + 1, max_row=last))
+            c.title = ch.get("caption", "")
+            c.height, c.width = 8, 17
+            if hasattr(c, "y_axis"):
+                c.y_axis.majorGridlines = None
+            if len(series) == 1:
+                c.legend = None
+            try:
+                for i, sr in enumerate(c.series):
+                    col = SERIES_COLORS[i % len(SERIES_COLORS)].lstrip("#")
+                    if isinstance(c, LineChart):
+                        sr.graphicalProperties.line.solidFill = col
+                    else:
+                        sr.graphicalProperties.solidFill = col
+            except (AttributeError, TypeError):
+                pass
+            ws.add_chart(c, f"B{r}")
+            r += 17
+            drow = last + 2
+            if ch.get("note"):
+                put(ch["note"], size=9, color=muted)
+
+        for tb in (sec.get("tables") or ([sec["table"]] if sec.get("table") else [])):
+            cols = tb.get("columns") or []
+            if not cols:
+                continue
+            if tb.get("caption"):
+                put(tb["caption"], size=10, bold=True, color=muted)
+            hdr = r
+            thin = Side(style="thin", color="D0D0D0")
+            for j, cn in enumerate(cols):
+                cell = ws.cell(row=hdr, column=2 + j, value=str(cn))
+                cell.font = Font(size=10, bold=True, color=muted)
+                cell.border = Border(bottom=thin)
+            for i, row in enumerate(tb.get("rows") or []):
+                for j, v in enumerate(row):
+                    cell = ws.cell(row=hdr + 1 + i, column=2 + j, value=v)
+                    cell.font = Font(size=10)
+                    if isinstance(v, (int, float)) and not isinstance(v, bool):
+                        cell.number_format = "#,##0.##"
+                        cell.alignment = Alignment(horizontal="right")
+            for j in range(1, len(cols)):
+                ws.column_dimensions[get_column_letter(2 + j)].width = 16
+            r = hdr + len(tb.get("rows") or []) + 2
+
+    bounds = spec.get("boundaries") or []
+    if bounds:
+        r += 1
+        put("这份分析的边界", size=12, bold=True, color=accent, gap=1)
+        for b in bounds:
+            put("· " + b, size=10, color=muted)
+
+    ws.freeze_panes = "A2"
+    wb.save(out)
+    return f"Excel 内报告，图表引用「数据」sheet —— 改数图会跟着变"
+
+
+# ── 形态四：六页纸文档 ──────────────────────────────────────────────
+def _dx_esc(s: str) -> str:
+    return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+
+def build_docx(spec: dict, out: Path) -> str:
+    """Word 文档，按 Amazon six-pager 的路子：叙述体，不是幻灯片。
+
+    six-pager 的精髓不是「六页」，是**用完整段落写**——
+    bullet 允许你把没想清楚的东西并列摆着蒙混过关，
+    完整句子会逼你写出因果和取舍。写不清楚，就是没想清楚。
+
+    所以这里把 summary 也渲染成段落而非项目符号。
+    图表转成数据表放进正文与附录（Word 对 SVG 支持不一致，
+    与其塞一张可能显示不出来的图，不如给能被引用的数字）。
+
+    手写 OOXML，纯标准库，不需要 python-docx。
+    """
+    import zipfile
+
+    body: list[str] = []
+
+    def para(text: str, style: str = "Body", ) -> None:
+        body.append(
+            f'<w:p><w:pPr><w:pStyle w:val="{style}"/></w:pPr>'
+            f'<w:r><w:t xml:space="preserve">{_dx_esc(text)}</w:t></w:r></w:p>')
+
+    def table(cols: list, rows: list) -> None:
+        w = int(9360 / max(len(cols), 1))
+        tr = ['<w:tbl><w:tblPr><w:tblStyle w:val="TableGrid"/>'
+              '<w:tblW w:w="9360" w:type="dxa"/></w:tblPr>']
+        tr.append("<w:tblGrid>" + "".join(f'<w:gridCol w:w="{w}"/>' for _ in cols)
+                  + "</w:tblGrid>")
+        tr.append("<w:tr>" + "".join(
+            f'<w:tc><w:tcPr><w:tcW w:w="{w}" w:type="dxa"/></w:tcPr>'
+            f'<w:p><w:pPr><w:pStyle w:val="Body"/></w:pPr><w:r><w:rPr><w:b/></w:rPr>'
+            f'<w:t>{_dx_esc(c)}</w:t></w:r></w:p></w:tc>' for c in cols) + "</w:tr>")
+        for row in rows:
+            cells = []
+            for v in row:
+                txt = _fmt(v) if isinstance(v, (int, float)) and not isinstance(v, bool) \
+                    else str(v)
+                cells.append(f'<w:tc><w:tcPr><w:tcW w:w="{w}" w:type="dxa"/></w:tcPr>'
+                             f'<w:p><w:pPr><w:pStyle w:val="Body"/></w:pPr>'
+                             f'<w:r><w:t>{_dx_esc(txt)}</w:t></w:r></w:p></w:tc>')
+            tr.append("<w:tr>" + "".join(cells) + "</w:tr>")
+        tr.append("</w:tbl>")
+        body.append("".join(tr))
+        para("")
+
+    para(spec.get("title", "数据分析报告"), "Title")
+    if spec.get("subtitle"):
+        para(spec["subtitle"], "Sub")
+
+    summary = spec.get("summary") or []
+    if summary:
+        para("摘要", "H1")
+        # 刻意合成段落而不是逐条列出：six-pager 不用 bullet
+        para("".join(s.rstrip("。.") + "。" for s in summary))
+
+    cal = spec.get("caliber") or {}
+    if cal:
+        para("口径", "H1")
+        para("；".join(f"{k}：{v}" for k, v in cal.items()) + "。")
+
+    appendix: list[tuple[str, list, list]] = []
+    for sec in spec.get("sections", []):
+        if sec.get("heading"):
+            para(sec["heading"], "H1")
+        for p in (sec.get("body") or "").split("\n\n"):
+            if p.strip():
+                para(p.strip())
+        for ch in (sec.get("charts") or ([sec["chart"]] if sec.get("chart") else [])):
+            labels = [str(x) for x in ch.get("labels", [])]
+            if not labels:
+                continue
+            if ch.get("type") == "line":
+                series = ch.get("series") or [{"name": ch.get("name", "值"),
+                                               "values": ch.get("values", [])}]
+                cols = ["项"] + [str(s.get("name", "值")) for s in series]
+                rows = [[labels[i]] + [(s.get("values") or [None])[i]
+                                       if i < len(s.get("values") or []) else None
+                                       for s in series] for i in range(len(labels))]
+            else:
+                vals = ch.get("values", [])
+                pairs = sorted(zip(labels, vals), key=lambda t: -(t[1] or 0)) \
+                    if ch.get("sort", True) else list(zip(labels, vals))
+                cols = ["项", str(ch.get("caption", "值"))]
+                rows = [[a, b] for a, b in pairs]
+            appendix.append((ch.get("caption", "数据"), cols, rows))
+            if ch.get("note"):
+                para(ch["note"])
+        for tb in (sec.get("tables") or ([sec["table"]] if sec.get("table") else [])):
+            if tb.get("columns"):
+                if tb.get("caption"):
+                    para(tb["caption"], "H2")
+                table(tb["columns"], tb.get("rows") or [])
+
+    bounds = spec.get("boundaries") or []
+    if bounds:
+        para("这份分析的边界", "H1")
+        para("".join(b.rstrip("。.") + "。" for b in bounds))
+
+    if appendix:
+        para("附录：数据", "H1")
+        for cap, cols, rows in appendix:
+            para(cap, "H2")
+            table(cols, rows)
+
+    doc = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+           '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+           f'<w:body>{"".join(body)}'
+           '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>'
+           '<w:pgMar w:top="1418" w:right="1276" w:bottom="1418" w:left="1276"/>'
+           '</w:sectPr></w:body></w:document>')
+
+    def _style(sid: str, name: str, size: int, bold: bool, before: int,
+               after: int, color: str = "000000") -> str:
+        return (f'<w:style w:type="paragraph" w:styleId="{sid}">'
+                f'<w:name w:val="{name}"/><w:qFormat/><w:pPr>'
+                f'<w:spacing w:before="{before}" w:after="{after}" w:line="312" '
+                f'w:lineRule="auto"/></w:pPr><w:rPr>'
+                f'<w:rFonts w:ascii="Helvetica" w:hAnsi="Helvetica" '
+                f'w:eastAsia="PingFang SC"/>'
+                f'{"<w:b/>" if bold else ""}<w:color w:val="{color}"/>'
+                f'<w:sz w:val="{size*2}"/><w:szCs w:val="{size*2}"/></w:rPr></w:style>')
+
+    styles = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+              '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+              + _style("Title", "Title", 20, True, 0, 160)
+              + _style("Sub", "Subtitle", 10, False, 0, 320, "6B6B6B")
+              + _style("H1", "heading 1", 14, True, 360, 140)
+              + _style("H2", "heading 2", 11, True, 240, 100)
+              + _style("Body", "Body Text", 11, False, 0, 140)
+              + '<w:style w:type="table" w:styleId="TableGrid"><w:name w:val="Table Grid"/>'
+                '<w:tblPr><w:tblBorders>'
+                + "".join(f'<w:{e} w:val="single" w:sz="4" w:color="CCCCCC"/>'
+                          for e in ("top", "left", "bottom", "right",
+                                    "insideH", "insideV"))
+                + '</w:tblBorders></w:tblPr></w:style>'
+              + "</w:styles>")
+
+    ct = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+          '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+          '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+          '<Default Extension="xml" ContentType="application/xml"/>'
+          '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+          '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>'
+          "</Types>")
+    rels = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>'
+            "</Relationships>")
+    drels = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+             '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+             '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
+             "</Relationships>")
+
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("[Content_Types].xml", ct)
+        z.writestr("_rels/.rels", rels)
+        z.writestr("word/document.xml", doc)
+        z.writestr("word/_rels/document.xml.rels", drels)
+        z.writestr("word/styles.xml", styles)
+
+    return "六页纸叙述体文档，图表数据进附录"
+
+
 TEMPLATE = {
     "title": "标题写结论，不写主题（「华东贡献六成销售额但增速垫底」而不是「销售额分析」）",
     "subtitle": "数据范围 / 制表日期",
@@ -597,7 +1152,10 @@ TEMPLATE = {
 def main() -> None:
     ap = argparse.ArgumentParser(description="把洞察渲染成自包含 HTML 报告")
     ap.add_argument("--spec", help="洞察 spec 的 JSON 文件路径")
-    ap.add_argument("--out", default="report.html")
+    ap.add_argument("--out", default=None, help="输出路径，默认按 --format 定后缀")
+    ap.add_argument("--format", default="html",
+                    choices=["html", "deck", "xlsx", "docx"],
+                    help="html=网页报告 deck=幻灯片 xlsx=Excel内报告 docx=六页纸文档")
     ap.add_argument("--template", action="store_true", help="打印一份 spec 模板")
     ap.add_argument("--styles", action="store_true", help="列出可用风格")
     a = ap.parse_args()
@@ -621,11 +1179,28 @@ def main() -> None:
     except json.JSONDecodeError as e:
         sys.exit(f"spec 不是合法 JSON：{e}")
 
-    out = Path(a.out).expanduser()
-    out.write_text(build_html(spec), encoding="utf-8")
-    size = out.stat().st_size / 1024
+    ext = {"html": ".html", "deck": ".deck.html", "xlsx": ".xlsx", "docx": ".docx"}[a.format]
+    out = Path(a.out).expanduser() if a.out else Path("report" + ext)
 
-    print(f"已生成：{out}  ({size:.1f} KB，自包含，无外部资源)")
+    if a.format == "html":
+        out.write_text(build_html(spec), encoding="utf-8")
+        note = "自包含，无外部资源"
+    elif a.format == "deck":
+        out.write_text(build_deck(spec), encoding="utf-8")
+        note = "自包含幻灯片，← → 翻页，浏览器打印即得每页一张的 PDF"
+    elif a.format == "xlsx":
+        note = build_xlsx(spec, out)
+    else:
+        note = build_docx(spec, out)
+
+    size = out.stat().st_size / 1024
+    print(f"已生成：{out}  ({size:.1f} KB，{note})")
+
+    # deck 和 html 都靠浏览器渲染，后缀不对浏览器会当纯文本显示，
+    # 而且不会有任何报错——只是打开后一片源码。
+    if a.format in ("html", "deck") and out.suffix.lower() not in (".html", ".htm"):
+        print(f"  ⚠ 文件名没有 .html 后缀，浏览器会把它当纯文本显示。"
+              f"建议改成 {out.with_suffix('.html').name}")
     missing = []
     if not spec.get("caliber"):
         missing.append("caliber（口径声明）—— 没有口径的数字无法被检验")

@@ -44,7 +44,7 @@ Panko (1998) 的研究说，86% 的电子表格含有错误。
 ```
 1  体检   这张表长什么样 —— 结构、类型、脏点。先看再算
 2  清洗   变成规范分析表，每一步可追溯可回放
-3  口径   指标定义、时间窗口、分母、单位、去不去重 —— 写下来才算数
+3  对齐   摸底 → 把你看到的告诉用户 → 问清他要什么 → 定口径
 4  分析   扫陷阱，再按问题类型走配方
 5  对账   行数守恒、总和守恒、与表内合计交叉验证
 6  交付   Excel / 图表 / 报告，口径随数字一起交付
@@ -57,7 +57,7 @@ Panko (1998) 的研究说，86% 的电子表格含有错误。
 | `scan_traps.py` | 分析陷阱扫描 | 下结论之前 |
 | `verify_numbers.py` | 数字对账 | 交付之前 |
 | `make_chart.py` | 图表推荐与生成 | 交付时 |
-| `make_report.py` | 自包含 HTML 报告 | 交付时 |
+| `make_report.py` | 报告：网页 / 幻灯片 / Excel / 六页纸 | 交付时 |
 
 ---
 
@@ -104,8 +104,22 @@ Panko (1998) 的研究说，86% 的电子表格含有错误。
 
 ## 报告
 
-`make_report.py` 产出**自包含的 HTML**：无 CDN、无外部字体、图表是自绘的内联 SVG。
-所以离线能开、内网能开、直接当邮件附件发也能开。
+**同一份洞察 spec，四种交付形态**，`--format` 决定给哪一种：
+
+| 形态 | 产物 | 什么时候用 |
+|---|---|---|
+| `html` | 自包含网页 | 默认。发链接或附件，点开就能看 |
+| `deck` | HTML 幻灯片 | 会上过一遍。← → 翻页，浏览器打印即得 PDF |
+| `xlsx` | Excel 内的报告 | 对方要继续动手——改数字图会跟着变 |
+| `docx` | 六页纸文档 | 要被逐字读、批注、存档的正式文档 |
+
+选哪种取决于这份东西接下来会被怎么使用，不是哪种好看。换个参数就行，不用重做。
+
+`docx` 走 Amazon six-pager 的路子：**叙述体，不用项目符号**——
+bullet 允许把没想清楚的东西并列摆着蒙混过关，完整段落会逼你写出因果和取舍。
+
+四种都自包含：`html`/`deck` 无 CDN 无外部字体、图表是自绘内联 SVG；
+`xlsx`/`docx` 是标准 Office 文件，docx 手写 OOXML，连 python-docx 都不需要。
 
 内置六种风格，各取自一类机构的设计语言。真正的区别不在配色，在结构：
 
@@ -193,7 +207,12 @@ merged cells, thousands separators, subtotal rows mixed into the detail),
 the mainstream approach overstated a simple sum by **161%** — with no error,
 no NaN, and no warning.
 
-Six-step workflow: profile → clean → declare caliber → analyze → reconcile → deliver.
+Six-step workflow: profile → clean → **align** → analyze → reconcile → deliver.
+
+The align step is deliberate: users rarely know what they want until they have
+seen what the data looks like. So clarification happens *after* profiling and
+cleaning, not before — you show them what you found, then ask what decision
+this needs to support.
 
 Four things it does differently: it reads raw cells before touching pandas;
 it treats the spreadsheet's own total rows as a free checksum; it reports
