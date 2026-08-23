@@ -218,6 +218,27 @@ python3 scripts/make_chart.py <文件> --x 门店 --y 销售额 --type bar --tit
 用公式不用硬编码的值、输入与计算与输出分区、假设集中放、加检查单元格、
 引用可追溯、不做不必要的四舍五入。
 
+**报告**：你写洞察，脚本负责渲染和画图。
+
+```bash
+python3 scripts/make_report.py --template > spec.json   # 拿模板
+python3 scripts/make_report.py --spec spec.json --out report.html
+```
+
+产出是**自包含的 HTML**——无 CDN、无外部字体、图表是内联 SVG，
+所以离线能开、内网能开、直接当附件发也能开。
+
+风格是**你的判断，不是用户的选择题**。看过数据、知道读者是谁、
+知道这东西拿去干什么，风格就定了。内置六种（咨询 / 投行 / 财经媒体 /
+杂志 / 科技公司 / 极简），都不合适就用 `custom_style` 自己配。
+
+**但要把判断说出来**——一句话讲清选了什么、为什么。用户看到理由才知道
+你不是随手挑的，不同意也能一句话改掉。选择的思考过程和风格库见
+`references/report-styles.md`。
+
+口径声明、边界声明、图表诚实性约束是结构性的，不由你决定要不要写；
+缺了脚本会警告。
+
 **要定期做的分析，交付模板而不是报告。** 如果这件事每月都要来一次，
 正确的产物是一个能一键刷新的 Excel 模板，做模板的时间第二个月就赚回来了。
 
@@ -252,15 +273,17 @@ python3 scripts/make_chart.py <文件> --x 门店 --y 销售额 --type bar --tit
 | `scripts/scan_traps.py` | 分析陷阱扫描 | 下结论之前 |
 | `scripts/verify_numbers.py` | 数字对账 | 交付之前 |
 | `scripts/make_chart.py` | 图表推荐与生成 | 交付时 |
+| `scripts/make_report.py` | 自包含 HTML 报告 | 交付时 |
 
 全部支持 `--json` 或结构化输出，退出码可用作流水线闸门
 （`verify_numbers.py` 不通过时返回 1）。
 
-两个脚本只需要 openpyxl（读 .xlsx 时），CSV 路径连它都不用，纯标准库。
-不用 pandas、不用 LibreOffice、不联网、不依赖任何特定 agent 平台的能力
-（不需要 subagent、不需要沙盒）。装进任何一个能跑 Python 的 agent 都能用。
+六个脚本只需要 openpyxl（读写 .xlsx 时），CSV 路径和 `make_report.py`
+连它都不用，纯标准库。不用 pandas、不用绘图库、不用 LibreOffice、不联网、
+不依赖任何特定 agent 平台的能力（不需要 subagent、不需要沙盒）。
+装进任何一个能跑 Python 的 agent 都能用。
 
-清洗和分析阶段你当然可以用 pandas —— 这里说的是**验证工具自己**没有前置条件，
+清洗和分析阶段你当然可以用 pandas —— 这里说的是**工具自己**没有前置条件，
 因为它要在「还没决定用什么工具处理这张表」的时刻就能跑。
 
 ## 参考
@@ -272,6 +295,7 @@ python3 scripts/make_chart.py <文件> --x 门店 --y 销售额 --type bar --tit
 | Excel 手艺：现代函数、透视、建模规范、经典坑 | `references/excel-craft.md` |
 | 图表怎么选、怎么不误导 | `references/charts.md` |
 | 洞察怎么挖、报告怎么搭 | `references/insight-report.md` |
+| 报告风格库与怎么选风格 | `references/report-styles.md` |
 
 参考文件是需要时才读的，不必一次全部载入。同时读三份以上，
 后面的会把前面的挤出你的工作记忆。
