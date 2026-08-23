@@ -1,25 +1,49 @@
-# huashu-excel · 花叔数据分析大师
+<div align="center">
 
-给 AI agent 的数据分析与 Excel 全流程 skill。
-装进 Claude Code、豆包、CodeBuddy 或任何能跑 Python 的 agent，都能用。
+# huashu-excel
 
-**它要解决的问题只有一个：让 AI 算出来的数字经得起追问。**
+> *「AI 算错的时候，长得和算对一模一样。」*
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Agent-Agnostic](https://img.shields.io/badge/Agent-Agnostic-blueviolet)](https://skills.sh)
+[![Skills](https://img.shields.io/badge/skills.sh-Compatible-green)](https://skills.sh)
+[![Deps](https://img.shields.io/badge/依赖-仅%20openpyxl-c2410c)](#装上就能用)
+
+<br>
+
+**数据分析与 Excel 全流程 · 体检 → 清洗 → 对齐 → 分析 → 对账 → 交付**
+
+<br>
+
+丢一份乱七八糟的 Excel 给它——标题占了第一行、表头两级、地区列用合并单元格、
+金额带千分位、中间夹着「华东小计」、尾巴三行是「合计/占比/同比」。
+
+主流做法算这份表的月度总额，结果**比真值高 161%，而且零报错、零 NaN、零警告**。
+一个 +161% 的错误，交付出去的时候长得和正确答案一模一样。
+
+这个 skill 存在的全部理由，就是不让这件事发生在你手上。它先读原始单元格再动
+pandas，把表里的「合计」行当成免费的校验和拿来对账，交付前跑一遍
+master check——不通过就不给你数字。
+
+```
+npx skills add alchaincyf/huashu-excel
+```
+
+跨 agent 通用——Claude Code、Cursor、Codex、OpenClaw、Hermes 都能装。
+
+[看效果对比](#看效果对比) · [装上就能用](#装上就能用) · [六步流程](#六步标准作业流程) · [四个不一样](#四个和别的工具不一样的地方) · [图表](#图表比用图表说话多一个维度) · [报告](#报告一份洞察四种形态)
+
+</div>
 
 ---
 
-## 为什么需要它
+## 看效果对比
 
-三届微软 Excel 世界冠军 Andrew Ngai 这样评价 AI 做数据分析：
+同一份表，同一个问题：「**1 月总销售额是多少？**」
 
-> 如果你用错误的数据训练 AI，它会给你错误的结果——但它还会装出对这些错误结果非常自信的样子。
+### 主流做法：`pd.read_excel()`
 
-这不是假想。下面是一个实测。
-
-一份普通的中国公司销售表：标题占了第一行、表头两级、地区列用合并单元格、
-金额带千分位逗号、中间夹着「华东小计」、尾巴三行是「合计/占比/同比」。
-
-用主流做法处理它——`pd.read_excel()`，发现表头位置不对就加 `header=`，
-发现数字读不出来就清掉千分位——然后算 1 月总销售额：
+发现表头位置不对就加 `header=`，发现数字读不出来就清掉千分位。看起来已经挺周全了。
 
 ```
 清理后求和：34,893,234        真值：13,367,767
@@ -28,14 +52,96 @@
 零报错  零 NaN  零警告
 ```
 
-错的原因：`合计` 行被当成了一家门店，`华东小计` 又被当成一家，重复行算了两次。
+错在三个地方，**没有任何一处会报错**：
 
-**一个 +161% 的错误，交付时长得和正确答案一模一样。**
+- `合计` 行的 15,368,317 被当成了一家门店
+- `华东小计` 的 6,157,150 又被当成一家门店
+- 有一行是粘贴事故造成的完全重复，算了两次
 
-Panko (1998) 的研究说，86% 的电子表格含有错误。
-欧洲电子表格风险兴趣组（EuSpRIG）从 1995 年起持续收录见诸媒体的事故，
-其中最著名的是 Reinhart-Rogoff 论文——Excel 选区少选 5 行，
-把 +2.2% 的 GDP 增速算成 −0.1%，而那篇论文当时是全球紧缩政策的主要依据。
+### huashu-excel
+
+体检阶段就把问题全列出来，一个都不猜：
+
+```
+【必须先处理】
+  1. 表头不在第 1 行：第 1, 2 行是标题/说明，真表头在第 3, 4 行
+  2. 两级表头。用 header=[2, 3] 读，否则下级表头会掉进数据区
+  3. 发现 4 个汇总/小计行（第 12, 17, 18, 19 行）混在数据区
+  4. 1 行与前面完全重复（第 11 行）
+  5. 3 处合并单元格落在数据区，pandas 只保留左上角，其余行变空
+
+【逐列】
+  E  一季度 / 1月
+      ⚠ 10/10 个数字被存成了文本 → 直接 sum() 会变成字符串拼接或得 0
+  I  退货额(元)
+      ⚠ 缺失值被写成了具体文字：「—」×2、「无」×1、「N/A」×1
+  D  首单日期
+      ⚠ 日期格式不统一：YYYY-M-D×7、YYYY年M月D日×1、Excel日期序列号×1、
+        M月D日（缺年份）×1
+```
+
+然后拿清洗后的明细，去对**表里自带的合计行**：
+
+```
+✓ 对账 · E列「1月」 vs 第12行「华东小计」
+    表内写 6,497,500.00，按「A列地区 == 华东」取 4 行算得 6,497,500.00  ✓ 一致
+✗ 对账 · F列「2月」 vs 第12行「华东小计」
+    表内写 6,490,430.00，明细算得 6,490,420.00  ✗ 差 10.00
+
+MASTER CHECK：不通过。1 项对不上。
+在解决之前，不要把这些数字写进任何交付物。
+```
+
+**那个差 10 块钱的错，是造这份测试数据的人手填小计时填错的。**
+相对误差 0.00%，肉眼永远发现不了，脚本一次揪出来。
+
+Panko (1998) 的研究说 **86% 的电子表格含有错误**。欧洲电子表格风险兴趣组
+（EuSpRIG）从 1995 年起持续收录见诸媒体的事故——最著名的是 Reinhart-Rogoff
+论文，Excel 选区少选了 5 行，把 +2.2% 的 GDP 增速算成 −0.1%，
+而那篇论文当时是全球紧缩政策的主要学术依据。
+
+---
+
+## 装上就能用
+
+```bash
+npx skills add alchaincyf/huashu-excel
+```
+
+或者直接 clone 到 agent 的 skills 目录：
+
+```bash
+git clone https://github.com/alchaincyf/huashu-excel ~/.claude/skills/huashu-excel
+```
+
+装完直接说人话：
+
+```
+"帮我分析下这份销售表"          → 走完整六步
+"这个表有多少行是脏的"          → 只跑体检
+"帮我把这份表洗干净"            → 体检 + 清洗，附一份可审计的 pandas 脚本
+"这个数你怎么算出来的"          → 对账 + 口径回溯
+"给我做份报告"                  → 图表 + 洞察 + 四种形态任选
+```
+
+六个脚本也能脱离 agent 单独用：
+
+```bash
+python3 scripts/profile_table.py 你的表.xlsx      # 算数字之前先看清楚
+python3 scripts/verify_numbers.py 你的表.xlsx     # 退出码 1 = 有对不上的
+```
+
+**依赖只有 `openpyxl`**（读写 .xlsx 时），CSV 路径和报告生成连它都不用，纯标准库。
+不用 pandas、不用绘图库、不用 LibreOffice、不联网、不依赖任何 agent 平台特性
+（不需要 subagent、不需要沙盒）。
+
+> 这不是为了炫技。体检要在「还没决定用什么工具处理这张表」的时刻就能跑，
+> 所以它自己必须几乎没有前置条件。已在屏蔽 pandas / numpy / openpyxl 的
+> 解释器里验证过全流程跑通。
+
+skill 会在开工时探测所处环境的能力，选那个环境下的最佳工作流——
+能起并行子任务就并行分析，只能串行就串行轮转视角，跑不了脚本就转成
+「我告诉你在 Excel 里怎么点」。
 
 ---
 
@@ -45,7 +151,7 @@ Panko (1998) 的研究说，86% 的电子表格含有错误。
 1  体检   这张表长什么样 —— 结构、类型、脏点。先看再算
 2  清洗   变成规范分析表，每一步可追溯可回放
 3  对齐   摸底 → 把你看到的告诉用户 → 问清他要什么 → 定口径
-4  分析   扫陷阱，再按问题类型走配方
+4  分析   扫陷阱，按问题类型走配方
 5  对账   行数守恒、总和守恒、与表内合计交叉验证
 6  交付   Excel / 图表 / 报告，口径随数字一起交付
 ```
@@ -59,6 +165,28 @@ Panko (1998) 的研究说，86% 的电子表格含有错误。
 | `make_chart.py` | 图表推荐与生成 | 交付时 |
 | `make_report.py` | 报告：网页 / 幻灯片 / Excel / 六页纸 | 交付时 |
 
+### 第 3 步「对齐」为什么值得单独成一步
+
+用户开口的时候，往往还不知道自己要什么——**因为他也没看过这份数据长什么样**。
+「帮我分析一下」是他此刻能给出的最诚实的表述。你这时候问他「你想看哪些维度」，
+他只能瞎猜，猜出来的还得你去实现。
+
+所以澄清不放在最开始，放在**你已经看懂数据、他也能看懂你的描述**之后：
+清洗完先出一段人话摸底（几行几列、有哪些维度和指标、分布形态、
+**一到两个已经能看到的现象**），带着它去问他要回答什么问题、
+这份分析拿去做什么决定、有没有你从数据里看不出来的背景。
+
+然后停下来等回答。这是整个流程里少数几个值得停的地方——
+带着错的问题做完整套分析，返工成本远高于等这一次。
+
+### 脚本是眼睛，不是大脑
+
+每跑完一个脚本，必答三问再往下走：**我看到了什么 / 这意味着什么 / 下一步要查什么**。
+
+判据写死在 skill 里：**如果跑完脚本之后，下一步动作和跑之前计划的一模一样，
+说明没有真的在看那个输出。** 分析是一次不断分叉的调查，
+照着固定顺序跑完六个脚本，产出的只是六段输出。
+
 ---
 
 ## 四个和别的工具不一样的地方
@@ -70,63 +198,96 @@ Panko (1998) 的研究说，86% 的电子表格含有错误。
 **二、把表里的「合计」行当成免费的校验和。**
 所有工具都把汇总行当噪音过滤掉。但那是原表作者用公式算出来的真值。
 拿清洗后的明细自己求和去对它——对不上就说明有一方错了，两种情况都必须报出来。
-这对应 ICAEW《Financial Modelling Code》的 `Include a master check`。
+这对应 ICAEW《Financial Modelling Code》(2024) 的 `Include a master check`。
 
 **三、默认给五数概括，不给均值。**
-业务数据几乎总是右偏的（少数大客户、少数爆款）。
-`df.describe()` 把 mean/std 放在最前面，而均值在偏态分布下描述的不是任何真实对象。
+业务数据几乎总是右偏的（少数大客户、少数爆款）。`df.describe()` 把 mean/std
+放在最前面，而均值在偏态分布下描述的不是任何一个真实对象。
 默认输出 min/Q1/中位数/Q3/max + IQR，这是 Tukey 的抗差统计。
 
 **四、机器判事实，人判品味。**
-「行数对不对、总和守不守恒、这个数能不能追回源单元格」——机器验死。
-「这个分析有没有意义」——明确交还给人，绝不用一个分数冒充客观。
+「行数对不对、总和守不守恒、这个数能不能追回源单元格」——机器验死，自动跑。
+「这个分析有没有意义、该不该这么切」——明确交还给人，
+绝不用一个分数冒充客观。
+
+### 还有一类问题，对账抓不到
+
+数字全算对了，结论照样是错的。`scan_traps.py` 专扫这一类：
+
+| 陷阱 | 会让你得出什么错误结论 |
+|---|---|
+| 辛普森悖论 | 分组内都是 A 好，合起来变成 B 好 |
+| 幽灵分组 | 「张伟」和「张伟 」被算成两个人，每组的数都是残缺的 |
+| 小基数 | 样本 3 个的组报「增长 200%」，其实是多了 4 个 |
+| 时间断点 | 缺失的月份不会报错，但会让趋势线撒谎 |
+| 双峰分布 | 混了两群对象，均值描述的是一个不存在的人 |
+| 极端集中 | 前 20% 贡献了 80%，均值没有代表性 |
 
 ---
 
-## 图表
+## 图表：比《用图表说话》多一个维度
 
-图表部分继承 Gene Zelazny《用图表说话》的核心律条——**先确定要传达的信息，
-再选图表形式**——并补上那本书里没有的两件事：
+继承 Gene Zelazny《用图表说话》的核心律条——**先确定要传达的信息，再选图表形式**，
+并补上那本书 1985 年还没有的两件事。
 
-**用实证决定视觉编码。** Cleveland & McGill (1984) 的图形感知实验测出了
-人读取不同视觉编码的精度阶梯：位置(共同基线) > 位置(非对齐) > 长度/方向/角度 >
-面积 > 体积/曲率 > 明暗/色饱和。位置判断比长度准 1.4–2.5 倍，比角度准 1.96 倍。
+### 一、用实证决定视觉编码
+
+Cleveland & McGill (1984) 的图形感知实验，测出了人读取不同视觉编码的精度阶梯：
+
+```
+位置(共同基线) > 位置(非对齐) > 长度/方向/角度 > 面积 > 体积/曲率 > 明暗/色饱和
+位置判断比长度准 1.4–2.5 倍，比角度准 1.96 倍
+```
 
 饼图靠角度和面积编码，正好落在下游。所以 `make_chart.py`
-**在类别超过 3 个时会拒绝生成饼图**，并给出理由和替代方案。
+**在类别超过 3 个时会拒绝生成饼图**：
+
+```
+拒绝生成饼图：当前 10 个类别，超过 3 类。
+原因：饼图靠角度和面积编码，在 Cleveland-McGill 的感知精度阶梯上排第 3 和第 4，
+而条形图的长度编码排第 2。
+改用 --type bar，并在标签上标注百分比——信息一样，读者读得更准。
+```
+
 这不是审美偏好，是有测量结果的。
 
-**检查这张图有没有在误导人。** 生成时自动执行：柱形图数值轴强制从 0
-（它编码长度）、折线图不强制从 0（它编码位置和斜率）、类别按值排序、
-单系列去图例、套用色盲友好色板。完整清单见 `references/charts.md`。
+### 二、检查这张图有没有在误导人
+
+生成时自动执行，不靠自觉：
+
+- 柱形图数值轴**强制从 0**（它编码长度，截断即失真）
+- 折线图**不强制从 0**（它编码位置和斜率，强行归零会压平真实波动）
+- 坐标轴用整刻度，不是 `139.68 / 115.50 / 91.32` 这种从数据直接算出来的碎数字
+- 类别按值排序、单系列去图例、类别过多自动聚合
+- 不完整的最后一期画虚线——**本期没走完却画成实线，是最常见的误导**
+- 套用色盲友好色板（约 8% 的男性有红绿色觉障碍，而红绿恰是最常用的选择）
+
+完整的诚实性检查清单见 [`references/charts.md`](references/charts.md)。
 
 ---
 
-## 报告
+## 报告：一份洞察，四种形态
 
-**同一份洞察 spec，四种交付形态**，`--format` 决定给哪一种：
+**先把图表和必要的分析做完，再决定用什么形态交付。** 形态是包装，
+包装不该影响里面装什么。同一份 spec，`--format` 换个参数就行，不用重做：
 
 | 形态 | 产物 | 什么时候用 |
 |---|---|---|
 | `html` | 自包含网页 | 默认。发链接或附件，点开就能看 |
-| `deck` | HTML 幻灯片 | 会上过一遍。← → 翻页，浏览器打印即得 PDF |
-| `xlsx` | Excel 内的报告 | 对方要继续动手——改数字图会跟着变 |
+| `deck` | HTML 幻灯片 | 要在会上过一遍。← → 翻页，浏览器打印即得 PDF |
+| `xlsx` | Excel 内的报告 | 对方要在表里继续动手——改数字图会跟着变 |
 | `docx` | 六页纸文档 | 要被逐字读、批注、存档的正式文档 |
 
-选哪种取决于这份东西接下来会被怎么使用，不是哪种好看。换个参数就行，不用重做。
+`docx` 走 Amazon six-pager 的路子：**叙述体，不用项目符号**。
+bullet 允许你把没想清楚的东西并列摆着蒙混过关，完整段落会逼你写出因果和取舍。
+写不清楚，就是没想清楚。技术上手写 OOXML，连 python-docx 都不需要。
 
-`docx` 走 Amazon six-pager 的路子：**叙述体，不用项目符号**——
-bullet 允许把没想清楚的东西并列摆着蒙混过关，完整段落会逼你写出因果和取舍。
-
-四种都自包含：`html`/`deck` 无 CDN 无外部字体、图表是自绘内联 SVG；
-`xlsx`/`docx` 是标准 Office 文件，docx 手写 OOXML，连 python-docx 都不需要。
-
-内置六种风格，各取自一类机构的设计语言。真正的区别不在配色，在结构：
+### 六种风格，区别在结构不在配色
 
 | | 结构特征 | 用在哪 |
 |---|---|---|
-| `consulting` | 自动 Exhibit 编号，图题写结论 | 战略分析、要拿去开会逐页过的材料 |
-| `bank` | 高信息密度、等宽数字、斑马纹表格、宽版心 | 财务建模、估值、对账、读者会逐行核 |
+| `consulting` | 自动 Exhibit 编号，图题即结论 | 战略分析、要拿去开会逐页过的材料 |
+| `bank` | 高信息密度、等宽数字、斑马纹、宽版心 | 财务建模、估值、对账、读者会逐行核 |
 | `editorial` | 三文鱼粉底、衬线标题、窄栏叙事 | 行业观察、深度解读 |
 | `magazine` | 红色标识块、紧凑排版 | 观点报告、有立场的分析 |
 | `product` | 圆角卡片、大留白 | 产品复盘、增长分析 |
@@ -134,38 +295,11 @@ bullet 允许把没想清楚的东西并列摆着蒙混过关，完整段落会�
 
 都不合适就传 `custom_style` 自己配色配版式，包括深色主题。
 
-**风格由 agent 判断，不做成用户的选择题。** 但要说出理由——
-用户看到理由才知道不是随手挑的，不同意也能一句话改掉。
+**风格由 agent 判断，不做成用户的选择题**——拿一堆风格去问「你想要哪种」，
+是把自己的活推给对方。但要把判断说出来，一句话讲清选了什么、为什么。
 
-口径声明、分析边界、图表诚实性约束是结构性的，不由 agent 决定要不要写，
+口径声明、分析边界、图表诚实性约束是结构性输出，不由 agent 决定要不要写，
 缺失时脚本会警告。
-
-## 安装
-
-skill 目录放到 agent 的 skills 路径下即可：
-
-```bash
-# Claude Code / 通用
-git clone https://github.com/<your-account>/huashu-excel ~/.claude/skills/huashu-excel
-
-# 或放进项目级 skills 目录
-git clone https://github.com/<your-account>/huashu-excel ./.claude/skills/huashu-excel
-```
-
-脚本也可以脱离 agent 单独用：
-
-```bash
-python3 scripts/profile_table.py 你的表.xlsx
-python3 scripts/verify_numbers.py 你的表.xlsx     # 退出码 1 = 有对不上的
-```
-
-**依赖**：只需要 `openpyxl`（读写 .xlsx 时）。CSV 路径连它都不用，纯标准库。
-不用 pandas、不用 LibreOffice、不联网、不依赖任何 agent 平台特性
-（不需要 subagent、不需要沙盒）。
-
-skill 会在开工时探测自己所处环境的能力，选择该环境下的最佳工作流——
-能起并行子任务就并行分析，只能串行就串行轮转视角，跑不了脚本就转成
-「给你 Excel 公式和操作步骤」。
 
 ---
 
@@ -187,42 +321,12 @@ skill 会在开工时探测自己所处环境的能力，选择该环境下的�
 
 引用的规范文本均为提炼转述并注明出处，不含受版权保护的原文复制。
 
+三届微软 Excel 世界冠军 Andrew Ngai 对 AI 做数据分析的判断，是这份 skill 的立论：
+
+> 如果你用错误的数据训练 AI，它会给你错误的结果——但它还会装出对这些错误结果非常自信的样子。
+
 ---
 
 ## License
 
 MIT
-
----
-
-## English
-
-**huashu-excel** is a data-analysis and Excel skill for AI agents. It works in
-Claude Code, Doubao, CodeBuddy, or any agent that can run Python.
-
-It exists to solve one problem: **making the numbers an AI produces survive scrutiny.**
-
-Measured on a typical messy spreadsheet (title in row 1, two-level header,
-merged cells, thousands separators, subtotal rows mixed into the detail),
-the mainstream approach overstated a simple sum by **161%** — with no error,
-no NaN, and no warning.
-
-Six-step workflow: profile → clean → **align** → analyze → reconcile → deliver.
-
-The align step is deliberate: users rarely know what they want until they have
-seen what the data looks like. So clarification happens *after* profiling and
-cleaning, not before — you show them what you found, then ask what decision
-this needs to support.
-
-Four things it does differently: it reads raw cells before touching pandas;
-it treats the spreadsheet's own total rows as a free checksum; it reports
-five-number summaries instead of mean/std by default (business data is skewed);
-and it draws a hard line between what a machine can verify (arithmetic) and
-what only a human can judge (whether the analysis means anything).
-
-Chart selection follows Zelazny's "message first, chart form second," corrected
-by the Cleveland–McGill perception hierarchy — which is why it will refuse to
-generate a pie chart beyond three categories.
-
-Dependencies: `openpyxl` only, and not even that for CSV. No pandas, no
-LibreOffice, no network, no platform-specific agent features.
