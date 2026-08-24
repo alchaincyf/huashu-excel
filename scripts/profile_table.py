@@ -817,6 +817,32 @@ def profile(path: Path, sheet: str | None = None, max_scan: int = 200) -> TableP
                 f"标识列（{col.identifier_reason}）——保持文本，不要转数值。"
                 f"转了会丢前导零、把 join 键变成浮点，而它的均值和离群点没有含义"
             )
+            # 标识列里那些「不是纯数字」的值往往不是脏数据，是业务语义：
+            # 发票号里的 C 是取消单、A 是坏账调整，科目码里的字母是特殊类别。
+            # 不做转换是对的，但**必须把它们抛出来给人看**——
+            # 一列编号里混着的那些异形值，常常是整份数据里最贵的一层信息。
+            odd = {}
+            for raw in raws:
+                if not isinstance(raw, str):
+                    continue
+                v = raw.strip()
+                if not v or v.isdigit():
+                    continue
+                # 按「前导非数字部分」归类，一类留一个代表值
+                key = re.sub(r"\d+", "#", v)[:12]
+                if key not in odd:
+                    odd[key] = v
+                if len(odd) >= 8:
+                    break
+            if odd:
+                n_odd = sum(1 for r in raws
+                            if isinstance(r, str) and r.strip() and not r.strip().isdigit())
+                col.issues.append(
+                    f"其中 {n_odd} 个值不是纯数字，形态举例："
+                    f"{sorted(odd.values())[:6]} —— **去看看它们是什么，不要放过。**"
+                    f"编号列里的异形值通常是业务语义（取消单、调整单、特殊类别），"
+                    f"不是脏数据"
+                )
 
         for m, cnt in marks.items():
             col.issues.append(f"{cnt} 个值带「{m}」")
