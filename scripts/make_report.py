@@ -985,6 +985,16 @@ def _dx_esc(s: str) -> str:
     return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
 
 
+# Word 的字体只能写死一个名字，没有 CSS 那种 fallback 链——
+# 所以这里必须选**Microsoft Office 在 Windows 和 macOS 上都随装**的字体。
+# 写 PingFang SC / Helvetica 这类 macOS 独有字体，在 Windows 上会静默回退成
+# 主题字体（通常是宋体），而且生成端一个警告都不会报。
+# 备选同样安全：DengXian(等线) / SimSun(宋体) / SimHei(黑体)。
+# 改这里之前先跑 verify_docx.py，它会拦住平台绑定的字体。
+_DX_CJK = "Microsoft YaHei"
+_DX_LATIN = "Microsoft YaHei"
+
+
 def build_docx(spec: dict, out: Path) -> str:
     """Word 文档，按 Amazon six-pager 的路子：叙述体，不是幻灯片。
 
@@ -1102,8 +1112,8 @@ def build_docx(spec: dict, out: Path) -> str:
                 f'<w:name w:val="{name}"/><w:qFormat/><w:pPr>'
                 f'<w:spacing w:before="{before}" w:after="{after}" w:line="312" '
                 f'w:lineRule="auto"/></w:pPr><w:rPr>'
-                f'<w:rFonts w:ascii="Helvetica" w:hAnsi="Helvetica" '
-                f'w:eastAsia="PingFang SC"/>'
+                f'<w:rFonts w:ascii="{_DX_LATIN}" w:hAnsi="{_DX_LATIN}" '
+                f'w:eastAsia="{_DX_CJK}" w:cs="{_DX_LATIN}"/>'
                 f'{"<w:b/>" if bold else ""}<w:color w:val="{color}"/>'
                 f'<w:sz w:val="{size*2}"/><w:szCs w:val="{size*2}"/></w:rPr></w:style>')
 

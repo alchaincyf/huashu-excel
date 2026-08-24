@@ -83,7 +83,31 @@ UNIT_SUFFIX = ("万元", "亿元", "千元", "百万", "万", "亿", "元", "个
 # Excel 1900 日期系统的合理业务区间：1990-01-01 ≈ 32874，2100-01-01 ≈ 73051
 SERIAL_MIN, SERIAL_MAX = 32874, 73051
 
+# 无分隔符的纯数字日期（Excel 序列号、YYYYMMDD）要占到这个比例，
+# 才认为整列真是日期。低于它说明那些是碰巧长得像日期的编号或金额——
+# 五位整数是订单号/工号/门店编号最常见的形态，八位整数则常常是
+# 「19,980,605 元」这种金额。带分隔符的 2026-08-24 不受此限，它不会是钱。
+AMBIGUOUS_DATE_LABELS = ("Excel日期序列号", "YYYYMMDD")
+SERIAL_DATE_MIN_SHARE = 0.30
+
 FULLWIDTH_SPACE = "　"
+
+# ── 标识列 ────────────────────────────────────────────────────────────
+# 长得像数字但不是数量的列：订单号、工号、机构编码、邮编、电话。
+# 对它们做类型转换会丢前导零、把 join 键变成浮点；算均值、方差、离群点
+# 则毫无意义（「预算科目编号的均值」不是一个数）。
+# 注意这里没有 _code / _number——它们必须卡后缀（见 IDENT_SUFFIX_WORD），
+# 否则 object_code_name（名称列）和 budget_number_of_contracts（合同数量）
+# 会被当成编号列，而它们一个是文本一个是真度量。
+IDENTIFIER_NAME_HINTS = (
+    "zip", "postal",
+    "phone", "tel_", "mobile", "sku", "isbn", "uuid", "guid",
+    "编号", "编码", "代码", "号码", "工号", "单号", "卡号", "邮编", "邮政编码",
+    "电话", "手机", "证号", "科目号", "机构号",
+)
+# 短词要卡词边界，否则 paid / bruno / memo 这类会被误判成编号列。
+IDENT_SUFFIX_WORD = re.compile(r"(?:^|[\s_\-])(id|no|num|code|number)$", re.IGNORECASE)
+IDENT_SUFFIX_CAMEL = re.compile(r"[a-z](Id|No|Num|Code|Number)$")
 
 
 # ── 数据结构 ──────────────────────────────────────────────────────────
@@ -97,6 +121,8 @@ class ColumnProfile:
     n_total: int = 0
     n_missing: int = 0
     n_unique: int = 0
+    is_identifier: bool = False       # 编号/代码/邮编这类：不转换、不做统计
+    identifier_reason: str = ""
     missing_disguised: dict[str, int] = field(default_factory=dict)
     issues: list[str] = field(default_factory=list)
     samples: list[str] = field(default_factory=list)
@@ -257,15 +283,75 @@ DATE_PATTERNS = [
 ]
 
 
-def sniff_date(raw: Any) -> str | None:
+def sniff_identifier(name: str, raws: list[Any]) -> str:
+    """这一列是不是标识列（编号/代码/邮编/电话）？是就返回理由，否则空串。
+
+    三条判据都是硬证据，宁可漏判也不误伤金额列——把一列钱错判成标识列，
+    代价是它不再被检查离群值；而把一列编号错判成数量，代价是主键被静默摧毁。
+
+    判据一：列名命中标识词表。
+    判据二：存在带前导零的值。数量不会写成 `002`，编号才会。
+    判据三：同列并存纯数字与字母数字混合值（`615` 与 `10E`、`536365` 与 `C489449`）。
+            这种列一转数值就一半整数一半字符串，反而制造出「混合类型」。
+    """
+    raw_name = (name or "").strip()
+    low = raw_name.lower()
+    for hint in IDENTIFIER_NAME_HINTS:
+        if hint in low:
+            return f"列名含「{hint}」"
+    # 「id」「no」这两个太短，子串匹配会误伤 paid / no.（避免把金额列当编号），
+    # 所以要求它们出现在词边界上：Customer ID / order_no / customerId 都算。
+    if IDENT_SUFFIX_WORD.search(raw_name) or IDENT_SUFFIX_CAMEL.search(raw_name):
+        return f"列名以编号词结尾（{raw_name}）"
+
+    leading_zero = 0
+    pure_digit = 0
+    alnum_mixed = 0
+    live = 0
+    for raw in raws:
+        if isinstance(raw, str):
+            s = raw.strip()
+            if not s:
+                continue
+            live += 1
+            if s.isdigit():
+                pure_digit += 1
+                if len(s) > 1 and s[0] == "0":
+                    leading_zero += 1
+            elif (s.isalnum() and any(ch.isdigit() for ch in s)
+                  and any(ch.isalpha() for ch in s)):
+                alnum_mixed += 1
+        elif isinstance(raw, (int, float)) and not isinstance(raw, bool):
+            live += 1
+            if float(raw).is_integer():
+                pure_digit += 1
+
+    if leading_zero:
+        return f"{leading_zero} 个值带前导零（002 这种，转数值就丢了）"
+    # 两边都要占到一定比例才算——否则一列商品描述里混进几个纯数字也会中招。
+    floor = max(1, int(live * 0.01))
+    if pure_digit >= floor and alnum_mixed >= floor:
+        return (f"纯数字({pure_digit})与字母数字({alnum_mixed})并存，"
+                f"转数值只会转走一半，反而制造混合类型列")
+    return ""
+
+
+def sniff_date(raw: Any, allow_serial: bool = True) -> str | None:
     """认出日期长什么样。返回格式标签，认不出返回 None。
 
     只匹配形状是不够的——必须校验月份、日期落在合法区间，
     否则小数、编号、金额都会被误认成日期，进而让整列被判成「混合类型」。
+
+    数值分支尤其危险：任何落在 32874–73051 的整数形状上都像序列号，
+    而五位整数正是订单号、工号、门店编号最常见的形态。所以这里只做形状判断，
+    「这一列到底是不是日期」由调用方按两道列级守卫决定——
+    `allow_serial=False` 关掉标识列，`SERIAL_DATE_MIN_SHARE` 挡掉零星命中。
     """
     if isinstance(raw, (datetime, date, time)):
         return "真日期类型"
     if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        if not allow_serial:
+            return None
         if SERIAL_MIN <= float(raw) <= SERIAL_MAX and float(raw).is_integer():
             return "Excel日期序列号"
         return None
@@ -618,12 +704,17 @@ def profile(path: Path, sheet: str | None = None, max_scan: int = 200) -> TableP
         raws = [grid[r - 1][c] for r in data_rows]
         col.n_total = len(raws)
 
+        # 先判标识列——它决定这一列的整数要不要当日期序列号看。
+        col.identifier_reason = sniff_identifier(col.name, raws)
+        col.is_identifier = bool(col.identifier_reason)
+
         disguised = Counter()
         kinds = Counter()
         nums: list[float] = []
         marks = Counter()
         date_fmts = Counter()
         texts: list[str] = []
+        serial_pending: list[tuple[Any, float]] = []   # 待定的日期序列号候选
 
         for raw in raws:
             if raw is None or (isinstance(raw, float) and math.isnan(raw)):
@@ -638,7 +729,12 @@ def profile(path: Path, sheet: str | None = None, max_scan: int = 200) -> TableP
                 disguised[s] += 1
                 continue
 
-            dfmt = sniff_date(raw)
+            dfmt = sniff_date(raw, allow_serial=not col.is_identifier)
+            if dfmt in AMBIGUOUS_DATE_LABELS:
+                # 先记着，等看完整列再判——零星几个长得像日期的纯数字是编号或
+                # 金额，不是日期。守卫在下面的 serial_pending 处理里。
+                serial_pending.append((raw, dfmt))
+                continue
             if dfmt:
                 kinds["date"] += 1
                 date_fmts[dfmt] += 1
@@ -656,6 +752,28 @@ def profile(path: Path, sheet: str | None = None, max_scan: int = 200) -> TableP
                 kinds["text"] += 1
                 texts.append(s)
 
+        # ── 日期序列号的列级守卫 ──────────────────────────────────────
+        # 只有当「像序列号的整数」占了这一列相当比例，才认为它真是日期列。
+        # 否则那些整数是编号或金额，原样还给数值分支。
+        if serial_pending:
+            n_live = col.n_total - col.n_missing
+            share = len(serial_pending) / n_live if n_live else 0
+            if share >= SERIAL_DATE_MIN_SHARE:
+                for _raw_v, lbl in serial_pending:
+                    kinds["date"] += 1
+                    date_fmts[lbl] += 1
+            else:
+                for raw_v, _lbl in serial_pending:
+                    val, mk = parse_number(raw_v)
+                    if val is None:
+                        continue
+                    kinds["number"] += 1
+                    nums.append(val)
+                    for m in mk:
+                        marks[m] += 1
+                    if isinstance(raw_v, str):
+                        kinds["_number_stored_as_text"] += 1
+
         col.n_unique = len({_norm(v) for v in raws if not _is_blank(v)})
         col.missing_disguised = dict(disguised)
         col.samples = [_norm(v) for v in raws[:4] if not _is_blank(v)]
@@ -668,10 +786,20 @@ def profile(path: Path, sheet: str | None = None, max_scan: int = 200) -> TableP
             top = max((k for k in ("number", "date", "text") if kinds.get(k)),
                       key=lambda k: kinds[k], default="text")
             col.inferred_kind = {"number": "数值", "date": "日期", "text": "文本"}[top]
+            # 标识列一律按文本对待：编号不是数量，它的均值、方差、离群点都没有含义，
+            # 下游脚本靠 inferred_kind 挑度量列，这里不改的话它们会去算「科目编号的均值」。
+            if col.is_identifier:
+                col.inferred_kind = "文本"
             mixed = sum(1 for k in ("number", "date", "text") if kinds.get(k, 0) > 0)
             if mixed > 1:
                 parts = ", ".join(f"{k}×{kinds[k]}" for k in ("number", "date", "text") if kinds.get(k))
-                col.issues.append(f"混合类型（{parts}）——同一列里不同行是不同东西，聚合前必须先统一")
+                if col.is_identifier:
+                    col.issues.append(
+                        f"数字与字母数字混排（{parts}）——标识列本来就长这样"
+                        f"（536365 与 C489449 是同一种东西）。整列按文本处理即可，"
+                        f"不要为了「统一类型」去做转换")
+                else:
+                    col.issues.append(f"混合类型（{parts}）——同一列里不同行是不同东西，聚合前必须先统一")
 
         # 类型层面的问题
         stored_as_text = kinds.get("_number_stored_as_text", 0)
@@ -683,6 +811,12 @@ def profile(path: Path, sheet: str | None = None, max_scan: int = 200) -> TableP
             )
         elif col.inferred_kind == "数值":
             col.declared_kind = "数值"
+
+        if col.is_identifier:
+            col.issues.append(
+                f"标识列（{col.identifier_reason}）——保持文本，不要转数值。"
+                f"转了会丢前导零、把 join 键变成浮点，而它的均值和离群点没有含义"
+            )
 
         for m, cnt in marks.items():
             col.issues.append(f"{cnt} 个值带「{m}」")

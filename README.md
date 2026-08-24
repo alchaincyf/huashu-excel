@@ -37,7 +37,7 @@ npx skills add alchaincyf/huashu-excel
 
 跨 agent 通用——Claude Code、Cursor、Codex、OpenClaw、Hermes 都能装。
 
-[看效果对比](#看效果对比) · [装上就能用](#装上就能用) · [七步流程](#七步标准作业流程) · [五个不一样](#五个和别的工具不一样的地方) · [图表](#图表比用图表说话多一个维度) · [报告](#报告直接写不套模板)
+[看效果对比](#看效果对比) · [装上就能用](#装上就能用) · [八步流程](#八步标准作业流程) · [五个不一样](#五个和别的工具不一样的地方) · [图表](#图表比用图表说话多一个维度) · [报告](#报告直接写不套模板)
 
 </div>
 
@@ -114,16 +114,27 @@ Panko (1998) 的研究说 **86% 的电子表格含有错误**。欧洲电子表�
 npx skills add alchaincyf/huashu-excel
 ```
 
-或者直接 clone 到 agent 的 skills 目录：
+或者直接 clone 到你的 agent 读 skills 的那个目录：
+
+| Runtime | 路径 |
+|---|---|
+| Claude Code | `~/.claude/skills/` |
+| Codex / Kimi Code / 多 agent 共用 | `~/.agents/skills/` |
+| 项目级（跟着仓库走） | `<项目>/.claude/skills/` 或 `<项目>/.agents/skills/` |
 
 ```bash
-git clone https://github.com/alchaincyf/huashu-excel ~/.claude/skills/huashu-excel
+git clone https://github.com/alchaincyf/huashu-excel <上表里的目录>/huashu-excel
 ```
+
+不确定装哪就用上面的 `npx skills add`，它会自己探测。
+也可以完全不装——把 `SKILL.md` 当成一份数据分析的方法论文档直接读。
 
 装完直接说人话：
 
 ```
-"帮我分析下这份销售表"          → 走完整七步
+"帮我分析下这份销售表"          → 走完整八步
+"这两个数怎么对不上"            → 体检 + 对账，先找口径差异
+"这个数靠谱吗"                  → 对账 + 独立复核
 "这个表有多少行是脏的"          → 只跑体检
 "帮我把这份表洗干净"            → 体检 + 清洗，附一份可审计的 pandas 脚本
 "这个数你怎么算出来的"          → 对账 + 口径回溯
@@ -136,6 +147,7 @@ git clone https://github.com/alchaincyf/huashu-excel ~/.claude/skills/huashu-exc
 python3 scripts/profile_table.py 你的表.xlsx      # 算数字之前先看清楚
 python3 scripts/verify_numbers.py 你的表.xlsx     # 退出码 1 = 有对不上的
 python3 scripts/verify_visual.py 报告.html        # 退出码 1 = 图画错了
+python3 scripts/verify_docx.py   报告.docx        # 退出码 1 = Word 换台机器就走样
 ```
 
 **依赖只有 `openpyxl`**（读写 .xlsx 时），CSV 路径和报告生成连它都不用，纯标准库。
@@ -152,7 +164,7 @@ skill 会在开工时探测所处环境的能力，选那个环境下的最佳�
 
 ---
 
-## 七步标准作业流程
+## 八步标准作业流程
 
 ```
 1  体检   这张表长什么样 —— 结构、类型、脏点。先看再算
@@ -162,7 +174,12 @@ skill 会在开工时探测所处环境的能力，选那个环境下的最佳�
 5  对账   行数守恒、总和守恒、与表内合计交叉验证
 6  交付   Excel / 图表 / 报告，口径随数字一起交付
 7  验图   渲染出来看画错了没有——手写 SVG 必然会犯那几类错
+8  质控   另派一个没参与创作的 agent 从原始数据重算，拆你的台
 ```
+
+最后一步是最容易被省掉的一步，而它抓到的问题比前面所有闸门加起来还多。
+**退出码验的是「算得对」，不是「结论对」**——一份内部对账分毫不差的报告，
+可以整体错一个财年，只要那一列的列名不是它字面的意思。
 
 | 脚本 | 干什么 | 什么时候 |
 |---|---|---|
@@ -170,7 +187,8 @@ skill 会在开工时探测所处环境的能力，选那个环境下的最佳�
 | `clean_table.py` | 清洗 + 生成可审计的 pandas 脚本 | 体检之后 |
 | `scan_traps.py` | 分析陷阱扫描 | 下结论之前 |
 | `verify_numbers.py` | 数字对账 | 交付之前 |
-| `verify_visual.py` | 渲染自检：越界 / 重叠 / 遮挡 / 双轴 / 图文数字打架 | 交付之前 |
+| `verify_visual.py` | HTML 渲染自检：越界 / 重叠 / 遮挡 / 双轴 / 图文数字打架 | 交付之前 |
+| `verify_docx.py` | Word 自检：字体平台绑定 / 中文缺 eastAsia / 空白页 / 图超版心 | 交付之前 |
 | `make_chart.py` | 图表推荐与生成 | 交付时 |
 | `make_report.py` | xlsx / docx 报告（HTML 直接写，不套模板） | 交付时 |
 
@@ -194,7 +212,7 @@ skill 会在开工时探测所处环境的能力，选那个环境下的最佳�
 
 判据写死在 skill 里：**如果跑完脚本之后，下一步动作和跑之前计划的一模一样，
 说明没有真的在看那个输出。** 分析是一次不断分叉的调查，
-照着固定顺序跑完七个脚本，产出的只是七段输出。
+照着固定顺序跑完八个脚本，产出的只是八段输出。
 
 ---
 
@@ -306,7 +324,7 @@ Office 格式仍走脚本，因为手写不划算：
 |---|---|
 | **HTML 报告 / 幻灯片** | **直接写** |
 | `xlsx` Excel 内报告 | `make_report.py --format xlsx`，图表引用数据 sheet，改数图跟着变 |
-| `docx` 六页纸文档 | `make_report.py --format docx`，Amazon six-pager 叙述体 |
+| `docx` 六页纸文档 | `make_report.py --format docx`，Amazon six-pager 叙述体。字体用 Office 双平台自带款，交付前跑 `verify_docx.py` |
 
 `docx` 那条走的是 six-pager 的精髓：**叙述体，不用项目符号**——
 bullet 允许把没想清楚的东西并列摆着蒙混过关，完整段落会逼你写出因果和取舍。
