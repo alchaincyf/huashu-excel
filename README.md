@@ -138,7 +138,7 @@ git clone https://github.com/alchaincyf/huashu-excel <上表里的目录>/huashu
 "这个表有多少行是脏的"          → 只跑体检
 "帮我把这份表洗干净"            → 体检 + 清洗，附一份可审计的 pandas 脚本
 "这个数你怎么算出来的"          → 对账 + 口径回溯
-"给我做份报告"                  → 图表 + 洞察 + 四种形态任选
+"给我做份报告"                  → 图表 + 洞察 + html/xlsx/docx 任选
 ```
 
 这些脚本也能脱离 agent 单独用：
@@ -188,7 +188,7 @@ skill 会在开工时探测所处环境的能力，选那个环境下的最佳�
 | `scan_traps.py` | 分析陷阱扫描 | 下结论之前 |
 | `verify_numbers.py` | 数字对账 | 交付之前 |
 | `verify_visual.py` | HTML 渲染自检：越界 / 重叠 / 遮挡 / 双轴 / 图文数字打架 | 交付之前 |
-| `verify_docx.py` | Word 自检：字体平台绑定 / 中文缺 eastAsia / 空白页 / 图超版心 | 交付之前 |
+| `verify_docx.py` | Word 自检：字体平台绑定 / 中文缺 eastAsia / 空白页 / 图超版心 / 表头不重复 | 交付之前 |
 | `make_chart.py` | 图表推荐与生成 | 交付时 |
 | `make_report.py` | xlsx / docx 报告（HTML 直接写，不套模板） | 交付时 |
 
@@ -305,7 +305,7 @@ Cleveland & McGill (1984) 的图形感知实验，测出了人读取不同视觉
 
 ## 报告：直接写，不套模板
 
-**HTML 报告和幻灯片直接写 HTML/CSS**，不从模板里挑。顶级设计师不用模板生成器——
+**HTML 报告直接写 HTML/CSS**，不从模板里挑。顶级设计师不用模板生成器——
 他看过内容之后为这份内容做设计。内置的六种机构风格（咨询 / 投行 / 财经媒体 /
 杂志 / 科技公司 / 极简）是**设计参考**，看它们怎么用结构做区分，不是拿来套的。
 
@@ -322,13 +322,24 @@ Office 格式仍走脚本，因为手写不划算：
 
 | 格式 | 怎么做 |
 |---|---|
-| **HTML 报告 / 幻灯片** | **直接写** |
+| **HTML 报告** | **直接写** |
+| **幻灯片 / PPT** | **不在本 skill 做** —— 转 [huashu-design](https://github.com/alchaincyf/huashu-design)，见下 |
 | `xlsx` Excel 内报告 | `make_report.py --format xlsx`，图表引用数据 sheet，改数图跟着变 |
 | `docx` 六页纸文档 | `make_report.py --format docx`，Amazon six-pager 叙述体。字体用 Office 双平台自带款，交付前跑 `verify_docx.py` |
 
 `docx` 那条走的是 six-pager 的精髓：**叙述体，不用项目符号**——
 bullet 允许把没想清楚的东西并列摆着蒙混过关，完整段落会逼你写出因果和取舍。
 写不清楚，就是没想清楚。手写 OOXML，连 python-docx 都不需要。
+
+### 幻灯片和 PPT 交给 huashu-design
+
+要 PPT / deck / 演示文稿时，本 skill 只出**分析内容和图表**，
+演示文稿的生成与视觉交给 [huashu-design](https://github.com/alchaincyf/huashu-design)
+（没装会先引导安装）。排版、母版、封面、视觉方向是另一个专业，
+硬做出来的结果是「一眼看得出是自动生成的」。
+
+交接会带三样过去：口径声明、论点结构、已经过渲染自检的内联 SVG——
+而不是把原始数据丢过去让它自己算。口径是上游定的，不该在下游被重新发明。
 
 ---
 
