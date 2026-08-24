@@ -136,6 +136,23 @@ CHECKS = """() => {
 }"""
 
 
+# 量之前先把内容全亮出来。两类结构性误报的根源都是「量了看不见的东西」：
+# ① 幻灯片用 display:none 藏非当前页，隐藏元素的包围盒必然 0×0，
+#    于是任何 deck 都 100% FAIL「渲染尺寸过小」（04 号压测把病因误诊成 CSS）；
+# ② <details> 折叠的附录同理。
+# 展开不改变任何几何——只是让本来要人翻到才看得见的内容变成可测量的。
+EXPAND = """() => {
+  document.querySelectorAll('details:not([open])').forEach(d => d.open = true);
+  let n = 0;
+  document.querySelectorAll('body *').forEach(e => {
+    if (getComputedStyle(e).display === 'none' && e.querySelector('svg')) {
+      e.style.setProperty('display', 'block', 'important'); n++;
+    }
+  });
+  return n;
+}"""
+
+
 def near_miss(svg_nums, body_nums, rel=0.008, min_abs=100):
     """图上数字与正文数字「接近但不相等」——多半是两处用了不同的取整口径。
     阈值刻意收得很紧（0.8%）：宁可漏报，也不要用一堆巧合淹掉真问题。"""
@@ -164,7 +181,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('html')
     ap.add_argument('--shots', metavar='前缀', help='额外保存分屏截图')
-    ap.add_argument('--width', type=int, default=1100)
+    ap.add_argument('--width', type=int, default=None,
+                    help='视口宽。默认：报告 1100，deck 自动切 1920')
+    ap.add_argument('--deck', action='store_true',
+                    help='按幻灯片验：多页隐藏结构会被自动识别，此开关用于强制')
     ap.add_argument('--json', action='store_true')
     ap.add_argument('--allow-dual-axis', action='store_true',
                     help='确实需要双轴且已在图上标注刻度为人为选定时使用')
@@ -185,33 +205,57 @@ def main():
     errs = []
     with sync_playwright() as p:
         b = p.chromium.launch()
-        pg = b.new_page(viewport={'width': a.width, 'height': 1000}, device_scale_factor=2)
+        pg = b.new_page(viewport={'width': a.width or 1100, 'height': 1000},
+                        device_scale_factor=2)
         pg.on('console', lambda m: errs.append(f'[{m.type}] {m.text}') if m.type == 'error' else None)
         pg.on('pageerror', lambda e: errs.append(f'[pageerror] {e}'))
         pg.goto('file://' + path)
         pg.wait_for_timeout(900)
+        expanded = pg.evaluate(EXPAND)
+        is_deck = a.deck or expanded >= 2
+        if is_deck and a.width is None:
+            # deck 按投影尺寸设计，拿 1100 宽的报告视口量它，
+            # 「页面横向溢出」这类读数全是视口错配的产物（06 号压测实锤）
+            pg.set_viewport_size({'width': 1920, 'height': 1080})
+            pg.wait_for_timeout(300)
         R = pg.evaluate(CHECKS)
         H = pg.evaluate('document.documentElement.scrollHeight')
         if a.shots:
-            y = 0; i = 0
-            while y < H and i < 24:
-                pg.evaluate(f'window.scrollTo(0,{y})'); pg.wait_for_timeout(180)
-                pg.screenshot(path=f'{a.shots}_{i}.png'); y += 950; i += 1
-            pg.screenshot(path=f'{a.shots}_整页.png', full_page=True)
+            slides = pg.query_selector_all('.slide') if is_deck else []
+            if slides:
+                for i, s in enumerate(slides):
+                    # 逐页强制可见再截：纯文字页（口径/边界）没有 svg，
+                    # 不在 EXPAND 的展开范围里，不亮出来截不到
+                    s.evaluate("el => el.style.setProperty('display','flex','important')")
+                    s.scroll_into_view_if_needed()
+                    pg.wait_for_timeout(120)
+                    s.screenshot(path=f'{a.shots}_{i}.png')
+            else:
+                y = 0; i = 0
+                while y < H and i < 24:
+                    pg.evaluate(f'window.scrollTo(0,{y})'); pg.wait_for_timeout(180)
+                    pg.screenshot(path=f'{a.shots}_{i}.png'); y += 950; i += 1
+                pg.screenshot(path=f'{a.shots}_整页.png', full_page=True)
         b.close()
 
     R['consoleErrors'] = errs
     R['nearMiss'] = near_miss(R['numbers']['svg'], R['numbers']['body'])
     R.pop('numbers', None)
 
+    R['expanded'] = expanded
+    R['isDeck'] = is_deck
     if a.json:
         print(json.dumps(R, ensure_ascii=False, indent=1));
         sys.exit(1 if (R['oob'] or R['textOverlap'] or R['textOnMark'] or R['tiny']
-                       or R['overflow']['overflows'] or errs) else 0)
+                       or (R['overflow']['overflows'] and not is_deck) or errs) else 0)
 
     fails, warns = [], []
     if R['overflow']['overflows']:
-        fails.append(f"页面横向溢出：scrollWidth {R['overflow']['scrollW']} > 视口 {R['overflow']['clientW']}")
+        msg = f"页面横向溢出：scrollWidth {R['overflow']['scrollW']} > 视口 {R['overflow']['clientW']}"
+        if is_deck:
+            warns.append(msg + "（deck 常为固定页宽设计，先确认设计宽度再下判断）")
+        else:
+            fails.append(msg)
     for o in R['oob']:
         fails.append(f"[{o['svg']}] <{o['tag']}> 画出 viewBox：box={o['box']} viewBox={o['viewBox']}"
                      + (f" 内容「{o['text']}」" if o['text'] else ''))
@@ -235,6 +279,9 @@ def main():
 
     print('─' * 68)
     print(f'渲染自检：{os.path.basename(path)}   共 {R["svgCount"]} 张 SVG，页高 {H}px')
+    if expanded:
+        print(f'（已先展开 {expanded} 个隐藏容器再测量'
+              + ('，按 deck 模式验，视口 1920×1080' if is_deck else '') + '）')
     print('─' * 68)
     if fails:
         print(f'\n❌ FAIL {len(fails)} 项（必须修）')

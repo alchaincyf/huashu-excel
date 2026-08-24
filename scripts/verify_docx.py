@@ -79,6 +79,41 @@ PLATFORM_ONLY = {
 EMU_PER_CM = 360000
 
 
+def xml_health(path: Path) -> list[str]:
+    """包结构合法性。后处理脚本（补图、改字体）最容易把包改坏——
+    实测有人往 [Content_Types].xml 插节点插到了根元素外面，Word 和
+    LibreOffice 都拒绝打开，而当时的闸门照样解析成功、全绿放行。
+    所以先验包，包坏了后面的一切检查都没有意义。"""
+    probs: list[str] = []
+    with zipfile.ZipFile(path) as z:
+        names = set(z.namelist())
+        for req in ("[Content_Types].xml", "_rels/.rels", "word/document.xml"):
+            if req not in names:
+                probs.append(f"缺关键部件 {req}，Word 无法打开")
+        for n in sorted(names):
+            if n.endswith(".xml") or n.endswith(".rels"):
+                try:
+                    ET.fromstring(z.read(n))
+                except ET.ParseError as e:
+                    probs.append(f"{n} 不是合法 XML（{e}）——Word/LibreOffice 会拒绝打开，"
+                                 "多半是后处理脚本把节点插到了根元素外面")
+        # 图片引用三方一致：document 里的 r:embed ↔ rels ↔ media 实体文件
+        if "word/_rels/document.xml.rels" in names and "word/document.xml" in names:
+            try:
+                relx = ET.fromstring(z.read("word/_rels/document.xml.rels"))
+                rels = {r.get("Id"): r.get("Target") for r in relx}
+                doc_raw = z.read("word/document.xml").decode("utf-8", "ignore")
+                for rid in set(re.findall(r'r:embed="([^"]+)"', doc_raw)):
+                    tgt = rels.get(rid)
+                    if not tgt:
+                        probs.append(f"图片引用 {rid} 在 rels 里没有对应关系，该图会显示为红叉")
+                    elif f"word/{tgt.lstrip('/')}" not in names and tgt.lstrip("/") not in names:
+                        probs.append(f"图片 {rid} 指向 {tgt}，包内没有这个文件")
+            except ET.ParseError:
+                pass    # 上面已经报过
+    return probs
+
+
 def _local(tag: str) -> str:
     return tag.split("}")[-1]
 
@@ -351,6 +386,14 @@ def main() -> int:
     if not path.exists():
         print(f"找不到文件：{path}", file=sys.stderr)
         return 2
+
+    # ⓪ 包结构：坏包一票否决，后面的检查都建立在能解析之上
+    health = xml_health(path)
+    if health:
+        print("❌ FAIL：包结构已损坏，其余检查跳过")
+        for h in health:
+            print("   -", h)
+        return 1
 
     d = parse(path)
     fails: list[str] = []

@@ -265,6 +265,15 @@ def fmt_axis(step: float) -> "callable":
 
 
 # ── SVG 图表：自己画，不依赖任何库 ──────────────────────────────────
+def _label_w(s: str, size: float = 13.0) -> float:
+    """文本渲染宽度估算。中文字符宽度约等于字号，西文数字约 0.55 倍。
+    所有留白都要按它算，不能写死：写死 130 时「豆包手搓」这种标签
+    会被 viewBox 边界裁掉首字，而且裁掉的部分不会有任何报错；
+    按 len() 算则中文必然溢出——中文一个字符占两倍宽。"""
+    wide = sum(1 for c in s if ord(c) > 0x2E80)
+    return wide * size + (len(s) - wide) * size * 0.55
+
+
 def svg_bar(labels: list[str], values: list[float], st: dict,
             highlight: int | None = None) -> str:
     """横向条形图。长度 + 共同基线是感知精度最高的编码方式
@@ -273,13 +282,6 @@ def svg_bar(labels: list[str], values: list[float], st: dict,
         return ""
     n = len(values)
     row_h, gap, pad_r, pad_t = 30, 8, 90, 8
-
-    # 左边距按最长标签算，不能写死：写死 130 时「豆包手搓」这种标签
-    # 会被 viewBox 左边界裁掉首字，而且裁掉的部分不会有任何报错。
-    # 中文字符宽度约等于字号，西文数字约 0.55 倍。
-    def _label_w(s: str, size: float = 13.0) -> float:
-        wide = sum(1 for c in s if ord(c) > 0x2E80)
-        return wide * size + (len(s) - wide) * size * 0.55
 
     LABEL_MAX = 190.0
     labels = [str(x) for x in labels]
@@ -337,7 +339,11 @@ def svg_line(labels: list[str], series: list[dict], st: dict,
     if not series or not series[0].get("values"):
         return ""
     w, h = 720, 300
-    pad_l, pad_r, pad_t, pad_b = 56, 80, 16, 34
+    pad_l, pad_t, pad_b = 56, 16, 34
+    # 右边距装线末系列名，按实际渲染宽度算。写死 80 时
+    # 「累计同比（官方）」这类中文系列名必然溢出 viewBox（06 号压测实锤）。
+    names = [str(s.get("name", "") or "") for s in series]
+    pad_r = min(max([_label_w(nm, 12) + 16 for nm in names] + [56.0]), 220.0)
     pw, ph = w - pad_l - pad_r, h - pad_t - pad_b
     allv = [v for s in series for v in s["values"] if v is not None]
     if not allv:
@@ -371,6 +377,7 @@ def svg_line(labels: list[str], series: list[dict], st: dict,
                      f'font-variant-numeric="tabular-nums">{axf(val)}</text>')
         val += step
 
+    end_labels: list[tuple[float, float, str, str]] = []
     for si, s in enumerate(series):
         color = SERIES_COLORS[si % len(SERIES_COLORS)]
         vals = s["values"]
@@ -394,10 +401,25 @@ def svg_line(labels: list[str], series: list[dict], st: dict,
                            f'stroke-linejoin="round"/>')
         for x, y in pts:
             parts.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="3" fill="{color}"/>')
-        # 直接在线末标注系列名，不做图例
-        lx, ly = pts[-1]
-        parts.append(f'<text x="{lx+9:.1f}" y="{ly+4:.1f}" font-size="12" '
-                     f'fill="{color}">{E(str(s.get("name", "")))[:10]}</text>')
+        # 直接在线末标注系列名，不做图例——但先收集，出循环统一排布
+        end_labels.append((*pts[-1], color, str(s.get("name", "") or "")))
+
+    # 线末标签的碰撞规避：两条线终点接近时标签会叠死（07 号压测实锤）。
+    # 按 y 排序后强制拉开最小行距，整体夹回绘图区内。
+    if end_labels:
+        min_gap = 15.0
+        order = sorted(range(len(end_labels)), key=lambda i: end_labels[i][1])
+        ys = [end_labels[i][1] + 4 for i in order]
+        for k in range(1, len(ys)):
+            if ys[k] - ys[k - 1] < min_gap:
+                ys[k] = ys[k - 1] + min_gap
+        over = ys[-1] - (h - pad_b - 4)
+        if over > 0:
+            ys = [y - over for y in ys]
+        for k, i in enumerate(order):
+            lx, _ly, color, name = end_labels[i]
+            parts.append(f'<text x="{lx+9:.1f}" y="{max(ys[k], pad_t + 10):.1f}" '
+                         f'font-size="12" fill="{color}">{E(name)}</text>')
 
     step = max(1, n // 8)
     for i, lab in enumerate(labels):
@@ -408,26 +430,30 @@ def svg_line(labels: list[str], series: list[dict], st: dict,
     return "".join(parts)
 
 
-def render_chart(ch: dict, st: dict, exhibit_no: int | None = None) -> str:
+def _chart_svg(ch: dict, st: dict) -> str:
+    """图表的 SVG 本体。html/deck 直接内联；docx 拿它渲成 PNG 内嵌。"""
     kind = ch.get("type", "bar")
     labels = [str(x) for x in ch.get("labels", [])]
     if kind == "line":
         series = ch.get("series") or [{"name": ch.get("name", ""),
                                        "values": ch.get("values", [])}]
-        body = svg_line(labels, series, st, ch.get("incomplete_last", False))
-    else:
-        vals = ch.get("values", [])
-        pairs = list(zip(labels, vals))
-        if ch.get("sort", True):
-            pairs.sort(key=lambda t: (t[1] is None, -(t[1] or 0)))
-        hl = ch.get("highlight")
-        hi = None
-        if hl is not None:
-            for i, (lab, _v) in enumerate(pairs):
-                if lab == str(hl):
-                    hi = i
-                    break
-        body = svg_bar([p[0] for p in pairs], [p[1] for p in pairs], st, hi)
+        return svg_line(labels, series, st, ch.get("incomplete_last", False))
+    vals = ch.get("values", [])
+    pairs = list(zip(labels, vals))
+    if ch.get("sort", True):
+        pairs.sort(key=lambda t: (t[1] is None, -(t[1] or 0)))
+    hl = ch.get("highlight")
+    hi = None
+    if hl is not None:
+        for i, (lab, _v) in enumerate(pairs):
+            if lab == str(hl):
+                hi = i
+                break
+    return svg_bar([p[0] for p in pairs], [p[1] for p in pairs], st, hi)
+
+
+def render_chart(ch: dict, st: dict, exhibit_no: int | None = None) -> str:
+    body = _chart_svg(ch, st)
     if not body:
         return ""
     cap = ch.get("caption", "")
@@ -629,33 +655,46 @@ font-family:%(b_font)s;-webkit-font-smoothing:antialiased}
 background:%(bg)s;color:%(fg)s;flex-direction:column;position:relative;
 container-type:size}
 .slide.on{display:flex}
-.stitle{font-family:%(h_font)s;font-size:clamp(22px,3.4vw,42px);
-line-height:1.28;font-weight:700;margin:0 0 2.6vh;letter-spacing:-.015em;
-max-width:80%%}
+.stitle{font-family:%(h_font)s;font-size:clamp(20px,2.9vw,36px);
+line-height:1.3;font-weight:700;margin:0 0 2.6vh;letter-spacing:-.015em;
+max-width:100%%;text-wrap:balance}
+.slide:not(.cover) .stitle{border-bottom:2px solid %(fg)s;padding-bottom:1.8vh}
+.sbody.one .scol{flex:1}
+.sbody.one .chart-body svg{max-height:64vh}
+.sfoot{border-top:1px solid %(rule)s;margin-top:2.2vh;padding-top:1.5vh;
+font-size:clamp(11px,1.15vw,15px);color:%(muted)s;line-height:1.7}
+.sfoot p{margin:0 0 .6vh}
 .skicker{font-size:clamp(10px,1.05vw,13px);letter-spacing:.14em;
 text-transform:uppercase;color:%(accent)s;font-weight:700;margin-bottom:1.4vh}
 .sbody{flex:1;display:flex;gap:3.2vw;min-height:0}
 .scol{flex:1;min-width:0;display:flex;flex-direction:column;justify-content:center}
 .sbody .scol:first-child{flex:1.5}
 .scol svg{max-height:62vh}
-.spoints{list-style:none;margin:0;padding:0;font-size:clamp(13px,1.4vw,19px);
+.scol>div{flex:0 1 100%%;min-height:0;display:flex;flex-direction:column;
+justify-content:center}
+.chart-title{font-size:clamp(13px,1.35vw,19px);font-weight:600;
+color:%(fg)s;margin:0 0 1.6vh}
+.chart-body{flex:0 1 100%%;min-height:0;display:flex;align-items:center}
+.chart-body svg{width:100%%;height:100%%;max-height:58vh}
+.chart-note{font-size:clamp(11px,1.05vw,14px);color:%(muted)s;margin:1.4vh 0 0}
+.spoints{list-style:none;margin:0;padding:0;font-size:clamp(13px,1.45vw,21px);
 line-height:1.65}
 .spoints li{margin:0 0 1.5vh;padding-left:1.1em;position:relative}
 .spoints li::before{content:"";position:absolute;left:0;top:.62em;
 width:.46em;height:.46em;background:%(accent)s;border-radius:50%%}
 .cover{justify-content:center;align-items:flex-start}
-.cover .stitle{font-size:clamp(30px,4.6vw,60px);max-width:88%%}
+.cover .stitle{font-size:clamp(28px,4.4vw,56px);max-width:92%%}
 .csub{font-size:clamp(12px,1.35vw,18px);color:%(muted)s;margin-top:1.8vh}
 .ckpis{display:flex;gap:3vw;margin-top:5vh;flex-wrap:wrap}
 .ckpi .k{font-size:clamp(10px,1vw,13px);color:%(muted)s}
 .ckpi .v{font-size:clamp(22px,3vw,40px);font-weight:700;
 font-variant-numeric:tabular-nums;letter-spacing:-.03em}
 .dl{display:grid;grid-template-columns:auto 1fr;gap:1.1vh 1.6vw;
-font-size:clamp(12px,1.25vw,17px);align-content:center}
+font-size:clamp(12px,1.3vw,18px);align-content:center}
 .dl dt{color:%(muted)s;white-space:nowrap}
 .dl dd{margin:0}
-table{border-collapse:collapse;width:100%%;font-size:clamp(11px,1.15vw,15px)}
-th,td{padding:.75vh 1vw;border-bottom:1px solid %(rule)s;text-align:left}
+table{border-collapse:collapse;width:100%%;font-size:clamp(12px,1.3vw,18px)}
+th,td{padding:.9vh 1.1vw;border-bottom:1px solid %(rule)s;text-align:left}
 th{color:%(muted)s;font-weight:600;white-space:nowrap}
 td.num{text-align:right;font-variant-numeric:tabular-nums}
 .pg{position:absolute;right:7vw;bottom:3.4vh;font-size:clamp(10px,1vw,13px);
@@ -726,7 +765,7 @@ def build_deck(spec: dict) -> str:
         pts = "".join(f"<li>{E(s)}</li>" for s in summary)
         slides.append(
             f'<div class="slide"><div class="skicker">核心结论</div>'
-            f'<h2 class="stitle">看完这一页就够了</h2>'
+            f'<h2 class="stitle">结论与建议</h2>'
             f'<div class="sbody"><div class="scol">'
             f'<ul class="spoints">{pts}</ul></div></div>'
             f'<div class="pg">{n_body}</div></div>')
@@ -745,23 +784,35 @@ def build_deck(spec: dict) -> str:
             head = E(sec.get("heading", ""))
             if bi > 0:
                 head += "（续）"
-            left = ""
+            vis = ""
             if kind == "chart":
-                left = render_chart(payload, st).replace('<figure class="chart">', '<div>') \
+                vis = render_chart(payload, st).replace('<figure class="chart">', '<div>') \
                                                .replace("</figure>", "</div>")
             elif kind == "table":
-                left = render_table(payload, st)
-            right = ""
-            if bi == 0 and paras:
-                right = ('<ul class="spoints">'
-                         + "".join(f"<li>{E(p)}</li>" for p in paras) + "</ul>")
-            body = f'<div class="scol">{left}</div>'
-            if right:
-                body += f'<div class="scol">{right}</div>'
+                vis = render_table(payload, st)
+            text_paras = paras if bi == 0 else []
+            # 版式跟内容走：解读短（≤2 段）用全宽大图 + 底部脚注条——
+            # 图是这一页的论证主体，解读降为脚注；文字确实多才左右分栏。
+            if vis and len(text_paras) <= 2:
+                foot = ""
+                if text_paras:
+                    foot = ('<div class="sfoot">'
+                            + "".join(f"<p>{E(p)}</p>" for p in text_paras)
+                            + "</div>")
+                inner = (f'<div class="sbody one"><div class="scol">{vis}</div>'
+                         f'</div>{foot}')
+            elif vis:
+                pts = ('<ul class="spoints">'
+                       + "".join(f"<li>{E(p)}</li>" for p in text_paras) + "</ul>")
+                inner = (f'<div class="sbody"><div class="scol">{vis}</div>'
+                         f'<div class="scol">{pts}</div></div>')
+            else:
+                pts = ('<ul class="spoints">'
+                       + "".join(f"<li>{E(p)}</li>" for p in text_paras) + "</ul>")
+                inner = f'<div class="sbody"><div class="scol">{pts}</div></div>'
             slides.append(
                 f'<div class="slide"><h2 class="stitle">{head}</h2>'
-                f'<div class="sbody">{body}</div>'
-                f'<div class="pg">{n_body}</div></div>')
+                f'{inner}<div class="pg">{n_body}</div></div>')
 
     # 口径页
     cal = spec.get("caliber") or {}
@@ -769,8 +820,8 @@ def build_deck(spec: dict) -> str:
         n_body += 1
         items = "".join(f"<dt>{E(str(k))}</dt><dd>{E(str(v))}</dd>" for k, v in cal.items())
         slides.append(
-            f'<div class="slide"><div class="skicker">口径</div>'
-            f'<h2 class="stitle">这些数字是怎么算出来的</h2>'
+            f'<div class="slide"><div class="skicker">附录</div>'
+            f'<h2 class="stitle">口径与方法</h2>'
             f'<div class="sbody"><div class="scol"><dl class="dl">{items}</dl></div></div>'
             f'<div class="pg">{n_body}</div></div>')
 
@@ -780,8 +831,8 @@ def build_deck(spec: dict) -> str:
         n_body += 1
         pts = "".join(f"<li>{E(b)}</li>" for b in bounds)
         slides.append(
-            f'<div class="slide"><div class="skicker">边界</div>'
-            f'<h2 class="stitle">这份分析在哪里会失效</h2>'
+            f'<div class="slide"><div class="skicker">附录</div>'
+            f'<h2 class="stitle">边界与风险提示</h2>'
             f'<div class="sbody"><div class="scol">'
             f'<ul class="spoints">{pts}</ul></div></div>'
             f'<div class="pg">{n_body}</div></div>')
@@ -995,6 +1046,65 @@ _DX_CJK = "Microsoft YaHei"
 _DX_LATIN = "Microsoft YaHei"
 
 
+_EMU_PER_PX = 9525            # 96 dpi
+_DOCX_TEXT_W_EMU = 9354 * 635  # 版心宽：A4 减页边距（twip → EMU）
+
+
+def _png_dims(data: bytes) -> tuple[int, int]:
+    """PNG 头里的宽高。IHDR 固定在第 16–24 字节，纯标准库。"""
+    import struct
+    return struct.unpack(">II", data[16:24])
+
+
+def _rasterize_svgs(svgs: list[str], st: dict, css_w: int = 1100) -> list[bytes] | None:
+    """内联 SVG → PNG（2x）。依赖 playwright——它已经是第 7 步渲染闸门的
+    依赖，不新增环境要求；起不来就返回 None，调用方降级为数据表并明说。"""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return None
+    blocks = "".join(
+        f'<div id="c{i}" style="width:{css_w}px;background:{st["bg"]};'
+        f'padding:14px 10px">{s}</div>' for i, s in enumerate(svgs))
+    doc = (f'<!doctype html><meta charset="utf-8"><body style="margin:0;'
+           f'font-family:{st["b_font"]}">{blocks}</body>')
+    try:
+        with sync_playwright() as p:
+            b = p.chromium.launch()
+            pg = b.new_page(viewport={"width": css_w + 40, "height": 800},
+                            device_scale_factor=2)
+            pg.set_content(doc)
+            pg.wait_for_timeout(120)
+            shots = [pg.query_selector(f"#c{i}").screenshot(type="png")
+                     for i in range(len(svgs))]
+            b.close()
+        return shots
+    except Exception:
+        return None
+
+
+def _docx_image(rid: str, n: int, px_w: int, px_h: int) -> str:
+    """内嵌图片的 OOXML。宽度取版心与实际宽度（2x 渲染折半）的较小者，
+    永远不超版心——verify_docx.py 的第 ④ 项查的就是这个。"""
+    cx = min(px_w * _EMU_PER_PX // 2, _DOCX_TEXT_W_EMU)
+    cy = int(cx * px_h / max(px_w, 1))
+    return (
+        f'<w:p><w:pPr><w:spacing w:after="80"/></w:pPr><w:r><w:drawing>'
+        f'<wp:inline distT="0" distB="0" distL="0" distR="0">'
+        f'<wp:extent cx="{cx}" cy="{cy}"/>'
+        f'<wp:docPr id="{n}" name="chart{n}"/>'
+        f'<a:graphic><a:graphicData '
+        f'uri="http://schemas.openxmlformats.org/drawingml/2006/picture">'
+        f'<pic:pic>'
+        f'<pic:nvPicPr><pic:cNvPr id="{n}" name="chart{n}.png"/>'
+        f'<pic:cNvPicPr/></pic:nvPicPr>'
+        f'<pic:blipFill><a:blip r:embed="{rid}"/>'
+        f'<a:stretch><a:fillRect/></a:stretch></pic:blipFill>'
+        f'<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm>'
+        f'<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>'
+        f'</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>')
+
+
 def build_docx(spec: dict, out: Path) -> str:
     """Word 文档，按 Amazon six-pager 的路子：叙述体，不是幻灯片。
 
@@ -1003,13 +1113,17 @@ def build_docx(spec: dict, out: Path) -> str:
     完整句子会逼你写出因果和取舍。写不清楚，就是没想清楚。
 
     所以这里把 summary 也渲染成段落而非项目符号。
-    图表转成数据表放进正文与附录（Word 对 SVG 支持不一致，
-    与其塞一张可能显示不出来的图，不如给能被引用的数字）。
+
+    图表以 PNG 内嵌正文（经 playwright 渲染，和 HTML 版长得一样），
+    数据表进附录供引用——图和表不互替：给 VP 的 Word 零可视化站不住，
+    这是四场压力测试一致的判决。环境缺 playwright 时降级为纯数据表，
+    并在文档里明说，不静默。
 
     手写 OOXML，纯标准库，不需要 python-docx。
     """
     import zipfile
 
+    st = resolve_style(spec)
     body: list[str] = []
 
     def para(text: str, style: str = "Body", ) -> None:
@@ -1023,7 +1137,10 @@ def build_docx(spec: dict, out: Path) -> str:
               '<w:tblW w:w="9360" w:type="dxa"/></w:tblPr>']
         tr.append("<w:tblGrid>" + "".join(f'<w:gridCol w:w="{w}"/>' for _ in cols)
                   + "</w:tblGrid>")
-        tr.append("<w:tr>" + "".join(
+        # 表头行：tblHeader 让它跨页重复，cantSplit 防止被拦腰截断。
+        # 缺这两个属性时本机看着完好，跨页后读者看不到列名——
+        # verify_docx.py 的第 ⑤ 项查的就是它，生成端必须自己先过自己的闸门。
+        tr.append('<w:tr><w:trPr><w:tblHeader/><w:cantSplit/></w:trPr>' + "".join(
             f'<w:tc><w:tcPr><w:tcW w:w="{w}" w:type="dxa"/></w:tcPr>'
             f'<w:p><w:pPr><w:pStyle w:val="Body"/></w:pPr><w:r><w:rPr><w:b/></w:rPr>'
             f'<w:t>{_dx_esc(c)}</w:t></w:r></w:p></w:tc>' for c in cols) + "</w:tr>")
@@ -1040,6 +1157,21 @@ def build_docx(spec: dict, out: Path) -> str:
         body.append("".join(tr))
         para("")
 
+    # 图表统一先渲一遍：一次浏览器会话渲完所有图，失败就整体降级
+    charts_all = [ch for sec in spec.get("sections", [])
+                  for ch in (sec.get("charts") or
+                             ([sec["chart"]] if sec.get("chart") else []))]
+    chart_svgs = [(ch, _chart_svg(ch, st)) for ch in charts_all]
+    chart_svgs = [(ch, s) for ch, s in chart_svgs if s]
+    rendered = _rasterize_svgs([s for _, s in chart_svgs], st) if chart_svgs else []
+    png_map: dict[int, bytes] = {}
+    if rendered:
+        for (ch, _), png in zip(chart_svgs, rendered):
+            png_map[id(ch)] = png
+    degraded = bool(chart_svgs) and not rendered
+    media: list[tuple[str, bytes]] = []
+    img_no = 0
+
     para(spec.get("title", "数据分析报告"), "Title")
     if spec.get("subtitle"):
         para(spec["subtitle"], "Sub")
@@ -1055,6 +1187,11 @@ def build_docx(spec: dict, out: Path) -> str:
         para("口径", "H1")
         para("；".join(f"{k}：{v}" for k, v in cal.items()) + "。")
 
+    if degraded:
+        # 降级要说出来，不能静默——读者该知道这份 Word 缺了什么、去哪补
+        para("说明：本环境缺少 playwright，图表未能渲染嵌入，仅以数据表"
+             "形式列于附录；完整图表见同名 HTML 报告。", "Note")
+
     appendix: list[tuple[str, list, list]] = []
     for sec in spec.get("sections", []):
         if sec.get("heading"):
@@ -1063,6 +1200,13 @@ def build_docx(spec: dict, out: Path) -> str:
             if p.strip():
                 para(p.strip())
         for ch in (sec.get("charts") or ([sec["chart"]] if sec.get("chart") else [])):
+            png = png_map.get(id(ch))
+            if png is not None:
+                img_no += 1
+                if ch.get("caption"):
+                    para(f"图 {img_no}｜{ch['caption']}", "Caption")
+                media.append((f"chart{img_no}.png", png))
+                body.append(_docx_image(f"rIdImg{img_no}", img_no, *_png_dims(png)))
             labels = [str(x) for x in ch.get("labels", [])]
             if not labels:
                 continue
@@ -1081,7 +1225,7 @@ def build_docx(spec: dict, out: Path) -> str:
                 rows = [[a, b] for a, b in pairs]
             appendix.append((ch.get("caption", "数据"), cols, rows))
             if ch.get("note"):
-                para(ch["note"])
+                para(ch["note"], "Note")
         for tb in (sec.get("tables") or ([sec["table"]] if sec.get("table") else [])):
             if tb.get("columns"):
                 if tb.get("caption"):
@@ -1100,7 +1244,11 @@ def build_docx(spec: dict, out: Path) -> str:
             table(cols, rows)
 
     doc = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-           '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+           '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+           'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" '
+           'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+           'xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" '
+           'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
            f'<w:body>{"".join(body)}'
            '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>'
            '<w:pgMar w:top="1418" w:right="1276" w:bottom="1418" w:left="1276"/>'
@@ -1124,6 +1272,8 @@ def build_docx(spec: dict, out: Path) -> str:
               + _style("H1", "heading 1", 14, True, 360, 140)
               + _style("H2", "heading 2", 11, True, 240, 100)
               + _style("Body", "Body Text", 11, False, 0, 140)
+              + _style("Caption", "caption", 10, True, 200, 60)
+              + _style("Note", "Note", 9, False, 20, 160, "6B6B6B")
               + '<w:style w:type="table" w:styleId="TableGrid"><w:name w:val="Table Grid"/>'
                 '<w:tblPr><w:tblBorders>'
                 + "".join(f'<w:{e} w:val="single" w:sz="4" w:color="CCCCCC"/>'
@@ -1136,6 +1286,7 @@ def build_docx(spec: dict, out: Path) -> str:
           '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
           '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
           '<Default Extension="xml" ContentType="application/xml"/>'
+          '<Default Extension="png" ContentType="image/png"/>'
           '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
           '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>'
           "</Types>")
@@ -1143,10 +1294,15 @@ def build_docx(spec: dict, out: Path) -> str:
             '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
             '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>'
             "</Relationships>")
+    img_rels = "".join(
+        f'<Relationship Id="rIdImg{i}" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" '
+        f'Target="media/{name}"/>'
+        for i, (name, _) in enumerate(media, 1))
     drels = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
              '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
              '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
-             "</Relationships>")
+             f"{img_rels}</Relationships>")
 
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("[Content_Types].xml", ct)
@@ -1154,8 +1310,13 @@ def build_docx(spec: dict, out: Path) -> str:
         z.writestr("word/document.xml", doc)
         z.writestr("word/_rels/document.xml.rels", drels)
         z.writestr("word/styles.xml", styles)
+        for name, data in media:
+            z.writestr(f"word/media/{name}", data)
 
-    return "六页纸叙述体文档，图表数据进附录"
+    if media:
+        return f"六页纸叙述体文档，{len(media)} 张图表内嵌，数据表进附录"
+    return "六页纸叙述体文档，图表数据进附录" + \
+        ("（缺 playwright，图未嵌入）" if degraded else "")
 
 
 def audit_spec(spec: dict) -> list[str]:
