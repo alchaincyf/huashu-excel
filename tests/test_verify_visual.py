@@ -20,6 +20,32 @@ sys.path.insert(0, str(SCRIPTS))
 
 pytest.importorskip("playwright")  # 没装浏览器就跳过，不报错
 
+import os  # noqa: E402
+
+# 本地若只装了完整 chromium（未装 headless shell），自动指向其 chrome.exe，
+# 让测试免等 headless shell 下载也能跑；CI/作者机器有 headless shell 时不设，
+# 走默认启动（verify_visual 仅在 PW_CHROMIUM_EXE 非空时改用 executable_path）。
+def _auto_exe() -> str:
+    """挑版本号最大的完整 chromium（chrome.exe）作为 executable_path。
+
+    完整 chromium 本身支持 headless，无需 headless shell。这样本地只要
+    装了完整 chromium 就能跑测试，不必等 headless shell 下载；CI 上
+    `playwright install chromium` 也会装完整 chromium，同样可用。
+    """
+    import re
+    base = Path(os.environ.get("LOCALAPPDATA", "")) / "ms-playwright"
+    cands = list(base.glob("chromium-*/chrome-win64/chrome.exe"))
+    if not cands:
+        return ""
+    def ver(p: Path) -> int:
+        m = re.search(r"chromium-(\d+)", str(p))
+        return int(m.group(1)) if m else 0
+    return str(max(cands, key=ver))
+
+_exe = _auto_exe()
+if _exe:
+    os.environ["PW_CHROMIUM_EXE"] = _exe
+
 from playwright.sync_api import sync_playwright  # noqa: E402
 import verify_visual as vv  # noqa: E402
 
@@ -35,7 +61,8 @@ HTML = """<!doctype html><html><body>
 
 def _run_checks(html_path: Path) -> dict:
     with sync_playwright() as p:
-        b = p.chromium.launch()
+        _exe = os.environ.get("PW_CHROMIUM_EXE") or None
+        b = p.chromium.launch(executable_path=_exe)
         pg = b.new_page()
         pg.goto("file://" + str(html_path))
         pg.wait_for_timeout(300)

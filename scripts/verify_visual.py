@@ -231,7 +231,10 @@ def main():
 
     errs = []
     with sync_playwright() as p:
-        b = p.chromium.launch()
+        # 本地若只装了完整 chromium（未装 headless shell），可用
+        # PW_CHROMIUM_EXE 指向 chrome.exe 绕过 headless shell 依赖。
+        _exe = os.environ.get('PW_CHROMIUM_EXE')
+        b = p.chromium.launch(executable_path=_exe) if _exe else p.chromium.launch()
         pg = b.new_page(viewport={'width': a.width or 1100, 'height': 1000},
                         device_scale_factor=2)
         pg.on('console', lambda m: errs.append(f'[{m.type}] {m.text}') if m.type == 'error' else None)
