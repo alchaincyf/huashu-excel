@@ -19,8 +19,9 @@
     python3 make_report.py --spec report.json --out report.html
     python3 make_report.py --template > report.json      # 拿一份模板改
 
-spec 结构见 --template。风格由 agent 按内容判断后填进 spec，
-不要拿去问用户——报告不是设计作品，选风格是你的活。
+spec 结构见 --template。呈现层的取值由 agent 按内容判断后填进 spec.custom_style，
+不要拿去问用户——报告不是设计作品，定它长什么样是你的活。
+本脚本不再提供内置风格，动手前先落一份设计计划：references/report-styles.md。
 
 依赖：无。纯标准库。
 """
@@ -34,134 +35,33 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# ── 风格库 ──────────────────────────────────────────────────────────
-# 每种风格取自一类机构的设计语言。真正的区别不在配色，在结构：
-# 咨询给每张图编号并把结论写进图题，投行把表格做到最高密度，
-# 财经媒体用衬线和窄栏做叙事，科技公司靠留白和圆角。
+# ── 渲染缺省值 ──────────────────────────────────────────────────────
+# 这里没有风格库。以前有六种（咨询 / 投行 / 财经媒体 / 杂志 / 科技公司 / 极简），
+# 已经连同 --styles 命令一起删掉 —— 理由见 references/report-styles.md 第八节：
+# 描述得越具体越难不用它，于是「为这份内容设计」退化成「从六个里挑一个」。
 #
-# 选哪种是 agent 的活，不是用户的活（见 references/report-styles.md）。
-# 都不合适就用 custom 自己配。
+# 下面这套 BASE 是一套无名的兜底缺省，不是一种风格。它存在的唯一理由是
+# xlsx / docx / deck 这些必须走脚本的格式，在没拿到设计计划时也得渲染得出来。
+# 走到它就说明「动手前先落一份设计计划」这一步被跳过了，resolve_style 会警告。
+#
+# 正常路径：agent 按 references/report-styles.md 第二节写出设计计划
+# （色 / 字 / 数字 / 间距 / 版式五段），把取值作为 spec.custom_style 传进来。
 SANS = "-apple-system,'PingFang SC','Microsoft YaHei','Hiragino Sans GB',Helvetica,sans-serif"
+# 留着不是给 BASE 用的，是给 custom_style 抄的 —— 中文衬线栈不好现写。
 SERIF = "'Songti SC','Source Han Serif SC','Noto Serif CJK SC',Georgia,'Times New Roman',serif"
 
-STYLES = {
-    "consulting": {
-        "desc": "咨询公司。深海军蓝，每张图编号 Exhibit N，图题即结论。战略分析、框架评估、董事会材料",
-        "bg": "#FFFFFF", "fg": "#051C2C", "muted": "#5A6E7C",
-        "rule": "#CBD5DD", "card": "#E7EEF2", "accent": "#2251FF",
-        "pos": "#00806A", "neg": "#C1372B",
-        "h_font": SANS, "b_font": SANS,
-        "exhibit": True,
-        "extra_css": """
-h1{letter-spacing:-.02em;font-weight:700;border-bottom:3px solid %(accent)s;
-padding-bottom:14px;display:inline-block}
-h2{border-bottom:0;font-size:19px;color:%(fg)s;
-padding-left:12px;border-left:4px solid %(accent)s}
-.chart-title{font-size:16px;line-height:1.5}
-.exhibit{font-size:11px;letter-spacing:.11em;text-transform:uppercase;
-color:%(accent)s;font-weight:700;margin-bottom:5px}
-.lede{border-left-width:4px;background:%(card)s}
-.kpi{border-top:3px solid %(accent)s;border-radius:0}
-th{text-transform:uppercase;letter-spacing:.05em;font-size:11.5px}
-""",
-    },
-    "bank": {
-        "desc": "投行研究报告。深蓝、高信息密度、等宽数字、细密分隔线。财务建模、估值、对账、尽调",
-        "bg": "#FFFFFF", "fg": "#0B1F3A", "muted": "#63748A",
-        "rule": "#CED5E0", "card": "#E8ECF3", "accent": "#0B4F8C",
-        "pos": "#0F6B3D", "neg": "#A01B22",
-        "h_font": SANS, "b_font": SANS,
-        "extra_css": """
-body{font-size:15px;line-height:1.65}
-.wrap{max-width:1180px}
-h1{font-size:26px;font-weight:700}
-h2{font-size:17px;margin:38px 0 10px;text-transform:none;
-border-bottom:2px solid %(fg)s;padding-bottom:6px}
-table{font-size:13px}
-th,td{padding:6px 10px}
-tbody tr:nth-child(even){background:%(card)s}
-.kpi{border-radius:3px;padding:12px 14px}
-.kpi .v{font-size:22px}
-.caliber{border-radius:3px;font-size:13px}
-.lede{border-radius:0;font-size:15.5px}
-""",
-    },
-    "editorial": {
-        "desc": "财经媒体。三文鱼粉底、衬线标题、窄栏叙事。行业观察、深度解读、有观点的报告",
-        "bg": "#FFF1E5", "fg": "#33302E", "muted": "#66605C",
-        "rule": "#D9C4AC", "card": "#FFF9F1", "accent": "#0F5499",
-        "pos": "#0D7680", "neg": "#CC0000",
-        "h_font": SERIF, "b_font": SANS,
-        "extra_css": """
-.wrap{max-width:900px}
-h1{font-size:34px;line-height:1.28}
-h2{font-family:%(h_font)s;border-bottom:0;font-size:22px;
-margin:48px 0 12px}
-p{font-size:16.5px;line-height:1.8}
-.lede{background:transparent;border-left:3px solid %(accent)s;
-font-family:%(h_font)s;font-size:18px}
-.kpi{background:%(card)s;border-color:%(rule)s}
-.chart{border-top:1px solid %(rule)s;padding-top:16px}
-""",
-    },
-    "magazine": {
-        "desc": "杂志式。白底红标块、紧凑排版、editorial 标题。观点报告、行业洞察、有立场的分析",
-        "bg": "#FFFFFF", "fg": "#121212", "muted": "#6E6E6E",
-        "rule": "#D5D5D5", "card": "#ECECEC", "accent": "#E3120B",
-        "pos": "#0B7A3B", "neg": "#E3120B",
-        "h_font": SANS, "b_font": SANS,
-        "extra_css": """
-.wrap{max-width:880px}
-h1{font-size:29px;line-height:1.3;font-weight:700}
-h1::before{content:"";display:block;width:52px;height:7px;
-background:%(accent)s;margin-bottom:15px}
-h2{border-bottom:0;font-size:18px;margin:44px 0 10px;
-padding-left:0}
-h2::before{content:"";display:inline-block;width:14px;height:3px;
-background:%(accent)s;vertical-align:middle;margin-right:9px}
-.chart-title::before{content:"";display:inline-block;width:9px;height:9px;
-background:%(accent)s;margin-right:8px}
-body{font-size:15.5px}
-.lede{background:%(card)s;border-left:3px solid %(accent)s}
-""",
-    },
-    "product": {
-        "desc": "科技公司。大留白、圆角卡片、克制的紫蓝强调。产品复盘、增长分析、内部评审",
-        "bg": "#FFFFFF", "fg": "#0A2540", "muted": "#66768C",
-        "rule": "#CBD5E2", "card": "#E7EFF7", "accent": "#635BFF",
-        "pos": "#09825D", "neg": "#CD3D64",
-        "h_font": SANS, "b_font": SANS,
-        "extra_css": """
-.wrap{max-width:1000px;padding-top:72px}
-h1{font-size:33px;letter-spacing:-.025em;font-weight:700}
-h2{border-bottom:0;font-size:21px;margin:56px 0 12px;letter-spacing:-.015em}
-.kpi{border-radius:12px;border-color:%(rule)s;background:%(card)s;padding:18px 20px}
-.kpi .v{letter-spacing:-.03em}
-.lede{border-radius:12px;border-left:0;background:%(card)s;padding:22px 24px}
-.caliber{border-radius:12px}
-.bounds{border-radius:12px}
-.chart{background:%(card)s;border-radius:12px;padding:20px 22px}
-table{font-size:14.5px}
-""",
-    },
-    "minimal": {
-        "desc": "极简。大量留白、无装饰。内部快看、单一结论、只想把数说清楚",
-        "bg": "#FFFFFF", "fg": "#000000", "muted": "#757575",
-        "rule": "#D5D5D5", "card": "#EDEDED", "accent": "#000000",
-        "pos": "#1F6F3F", "neg": "#95291F",
-        "h_font": SANS, "b_font": SANS,
-        "extra_css": """
-.wrap{max-width:860px}
-h2{border-bottom:0;font-size:18px;margin:48px 0 10px}
-.lede{background:transparent;border-left:2px solid %(fg)s}
-.kpi{border:0;background:transparent;padding:0 20px 0 0}
-.kpis{gap:32px}
-""",
-    },
+# 刻意保持无个性：没有强调色（accent 就是正文色）、没有 extra_css、不编 Exhibit 号。
+# 它不该看起来像「被选过」—— 它本来就没有被选过，而那正是要传达出去的信息。
+# pos / neg 留着，因为它们是语义色不是装饰：正负数值该有确定的颜色。
+BASE = {
+    "desc": "无名兜底缺省，不是风格。有设计计划时应当被 custom_style 覆盖掉",
+    "bg": "#FFFFFF", "fg": "#1A1A1A", "muted": "#6B6B6B",
+    "rule": "#D4D4D4", "card": "#F0F0F0", "accent": "#1A1A1A",
+    "pos": "#1F6F3F", "neg": "#95291F",
+    "h_font": SANS, "b_font": SANS,
+    "exhibit": False,
+    "extra_css": "",
 }
-# 别名，向后兼容
-STYLES["report"] = STYLES["editorial"]
-STYLES["finance"] = STYLES["bank"]
 
 # 色盲友好色板（Wong 系）：避开红绿对立，约 8% 男性有红绿色觉障碍
 SERIES_COLORS = ["#0173B2", "#DE8F05", "#029E73", "#CC78BC", "#CA9161", "#56B4E9"]
@@ -553,19 +453,46 @@ font-size:12px;color:%(muted)s}
 """
 
 
-def resolve_style(spec: dict) -> dict:
-    """定出这份报告用什么风格。
+_WARNED: set[str] = set()
 
-    优先级：spec.custom_style（agent 自己配的）> spec.style（内置名）> consulting。
-    内置的都不合适时，agent 应该直接给 custom_style，不要将就一个不对的。
+
+def _warn_once(key: str, msg: str) -> None:
+    """同一条警告一次运行只打一遍——四种 format 各会调一次 resolve_style。"""
+    if key not in _WARNED:
+        _WARNED.add(key)
+        print(msg, file=sys.stderr)
+
+
+def resolve_style(spec: dict) -> dict:
+    """定出这份报告呈现层的取值。
+
+    正常路径：agent 按 references/report-styles.md 第二节写出设计计划，
+    把色 / 字 / 间距的取值作为 spec.custom_style 传进来。
+    没给就回落到 BASE —— 那不是「选了一种朴素风格」，是这一步被跳过了。
     """
-    base = dict(STYLES.get(spec.get("style", "consulting"), STYLES["consulting"]))
+    base = dict(BASE)
     custom = spec.get("custom_style")
-    if isinstance(custom, dict):
+    if isinstance(custom, dict) and custom:
         # 只允许覆盖表现层字段，防止 spec 注入结构性内容
         allowed = {"bg", "fg", "muted", "rule", "card", "accent", "pos", "neg",
                    "h_font", "b_font", "extra_css", "exhibit", "desc"}
+        unknown = sorted(set(custom) - allowed)
         base.update({k: v for k, v in custom.items() if k in allowed})
+        if unknown:
+            _warn_once("unknown", "⚠ custom_style 里这些字段不认识，已忽略："
+                       + "、".join(unknown))
+    else:
+        _warn_once("nostyle",
+                   "⚠ 没有 custom_style，用的是无名兜底缺省——这份报告的版式"
+                   "不是为它的内容设计的。\n"
+                   "  正常做法：先按 references/report-styles.md 第二节落一份"
+                   "设计计划（色 / 字 / 数字 / 间距 / 版式），再把取值填进 custom_style。")
+
+    if spec.get("style"):
+        _warn_once("legacy",
+                   f"⚠ spec.style（{spec['style']!r}）已经不起作用了：内置风格库"
+                   "连同 --styles 一起删了，理由见 references/report-styles.md 第八节。")
+
     base.setdefault("extra_css", "")
     base.setdefault("exhibit", False)
     return base
@@ -1375,9 +1302,17 @@ def audit_spec(spec: dict) -> list[str]:
 TEMPLATE = {
     "title": "标题写结论，不写主题（「华东贡献六成销售额但增速垫底」而不是「销售额分析」）",
     "subtitle": "数据范围 / 制表日期",
-    "style": "report",
-    "_style_note": "report=默认业务报告 | finance=财务审计类 | minimal=内部快看。"
-                   "你按内容自己选，不要拿去问用户。",
+    "custom_style": {
+        "bg": "#FFFFFF", "fg": "#1A1A1A", "muted": "#6B6B6B",
+        "rule": "#D4D4D4", "card": "#F0F0F0", "accent": "#1A1A1A",
+        "pos": "#1F6F3F", "neg": "#95291F",
+        "exhibit": False,
+        "extra_css": ""
+    },
+    "_style_note": "上面是兜底缺省值，原样交出去等于没设计。先按 "
+                   "references/report-styles.md 第二节落一份设计计划"
+                   "（色 / 字 / 数字 / 间距 / 版式五段），再把取值填回来；"
+                   "第五节是不许长成的十五个样子。这是你的活，不要拿去问用户。",
     "kpis": [
         {"label": "上半年销售额", "value": 14688217, "note": "较去年同期 +12.4%", "delta": 1}
     ],
@@ -1440,14 +1375,8 @@ def main() -> None:
                     choices=["html", "deck", "xlsx", "docx"],
                     help="html=网页报告 deck=幻灯片 xlsx=Excel内报告 docx=六页纸文档")
     ap.add_argument("--template", action="store_true", help="打印一份 spec 模板")
-    ap.add_argument("--styles", action="store_true", help="列出可用风格")
     a = ap.parse_args()
 
-    if a.styles:
-        for k, v in STYLES.items():
-            print(f"{k:10} {v['desc']}")
-        print("\n按内容自己选，不要拿去问用户——报告不是设计作品。")
-        return
     if a.template:
         print(json.dumps(TEMPLATE, ensure_ascii=False, indent=2))
         return
