@@ -4,7 +4,8 @@
 verify_visual.py — 交付前的渲染闸门。
 
 数字有 verify_numbers.py 把关，图表一直没有。手写 SVG 必然会犯的那几类错
-（线画出框、标签叠成一团、文字压住柱子、图上数字和正文对不上），
+（线画出框、标签叠成一团、文字压住柱子、两个数据标记互相重叠、图上数字和正文
+对不上、无障碍标签里的数字写错），
 肉眼扫一遍看不出来，渲染出来一看全在。这个脚本把它们变成退出码。
 
 它只判机器能判死的事实，不判美不美——那是你的活。
@@ -22,8 +23,8 @@ verify_visual.py — 交付前的渲染闸门。
 import sys, os, json, argparse, re
 
 CHECKS = """() => {
-  const out = {overflow:null, oob:[], textOverlap:[], textOnMark:[], tiny:[],
-               svgCount:0, dualAxis:[], numbers:{svg:[], body:[]}};
+  const out = {overflow:null, oob:[], textOverlap:[], textOnMark:[], markOverlap:[], tiny:[],
+               svgCount:0, dualAxis:[], numbers:{svg:[], body:[], meta:[]}};
 
   // 1) 页面横向溢出
   const de = document.documentElement;
@@ -107,6 +108,19 @@ CHECKS = """() => {
                              mark: [...tags].join('/'), coverPct: +(frac*100).toFixed(0)});
     });
 
+    // 4b) 图形之间互相重叠（已知盲区1：原逻辑只报文字相关重叠，漏掉 mark-on-mark）。
+    //     两根柱子/两个点部分重叠时肉眼一样刺目，但原脚本不报。
+    //     阈值取 0.30：只抓显著重叠，避免「小圆点压在柱顶」这类正常标注误报。
+    for (let i=0;i<marks.length;i++) for (let j=i+1;j<marks.length;j++) {
+      const A=marks[i].bb, B=marks[j].bb;
+      if (!rectsOverlap(A,B)) continue;
+      const ov = inter(A,B);
+      const frac = ov / Math.min(area(A), area(B));
+      if (frac > 0.30) out.markOverlap.push({svg: label,
+        a: marks[i].el.tagName, b: marks[j].el.tagName,
+        overlapPct: +(frac*100).toFixed(0)});
+    }
+
     // 5) 疑似双轴：左右两侧各有一组刻度文字
     const leftTicks = texts.filter(t => t.bb.x < W*0.12 && /^[\\d,.\\-–%万k ]+$/.test(t.t));
     const rightTicks = texts.filter(t => t.bb.x+t.bb.width > W*0.88 && /^[\\d,.\\-–%万k ]+$/.test(t.t));
@@ -123,6 +137,19 @@ CHECKS = """() => {
       const m = t.t.replace(/,/g,'').match(/-?\\d+(?:\\.\\d+)?/g);
       if (m) m.forEach(x => out.numbers.svg.push(parseFloat(x)));
     });
+  });
+
+  // 4c) 无障碍标签里的数字（已知盲区2）：aria-label / <title> / <desc>。
+  //     原脚本只扫可见 text 与正文，图注和正文都对、只有 aria-label 写错一个数时
+  //     完全看不见。这里把那些数字补采进 numbers.meta，交给 near_miss 交叉核对。
+  document.querySelectorAll('svg[aria-label], svg title, svg desc, [aria-label]').forEach(el => {
+    let txt = '';
+    if (el.tagName === 'svg') txt = el.getAttribute('aria-label') || '';
+    else txt = (el.textContent || '') + ' ' + (el.getAttribute('aria-label') || '');
+    if (txt) {
+      const m = txt.replace(/,/g,'').match(/-?\\d+(?:\\.\\d+)?/g);
+      if (m) m.forEach(x => out.numbers.meta.push(parseFloat(x)));
+    }
   });
 
   // 正文数字（排除 svg 内的）
@@ -240,6 +267,7 @@ def main():
 
     R['consoleErrors'] = errs
     R['nearMiss'] = near_miss(R['numbers']['svg'], R['numbers']['body'])
+    R['nearMissMeta'] = near_miss(R['numbers']['meta'], R['numbers']['svg'] + R['numbers']['body'])
     R.pop('numbers', None)
 
     R['expanded'] = expanded
@@ -273,7 +301,15 @@ def main():
             "双轴的视觉对比取决于你选的两个缩放比例，换个比例就换个结论——"
             "优先改成指数化（同起点=100）或上下两张共享 X 轴的小图。"
             "确有必要请加 --allow-dual-axis 并在图上注明刻度为人为选定。")
+    for o in R['markOverlap']:
+        warns.append(f"[{o['svg']}] 图形互相重叠 {o['overlapPct']}%：<{o['a']}> × <{o['b']}>"
+                     "——两个数据标记叠在一起会看不清，错开或分面")
     for o in R['nearMiss']:
+        warns.append(f"图上 {o['svg']} 与正文 {o['body']} 相差 {o['diffPct']}%——"
+                     "同一个量两处取整口径可能不一致，核一下")
+    for o in R['nearMissMeta']:
+        warns.append(f"无障碍标签 {o['svg']} 与图/正文 {o['body']} 相差 {o['diffPct']}%——"
+                     "aria-label/<title> 里的数字写错，屏幕阅读器读者会读到错数，核一下")
         warns.append(f"图上 {o['svg']} 与正文 {o['body']} 相差 {o['diffPct']}%——"
                      "同一个量两处取整口径可能不一致，核一下")
 
