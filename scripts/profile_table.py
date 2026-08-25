@@ -191,6 +191,24 @@ def _looks_like_footnote(s: str) -> bool:
     return bool(t) and any(t.startswith(p) for p in FOOTNOTE_PREFIX)
 
 
+# 简单聚合公式：=SUM(range) / =SUBTOTAL(9,range) / =AVERAGE(range)
+# 这类公式是小计/合计行的精确信号，比纯关键词更准，能抓住「华东小计」标签
+# 被拆到后面列、甚至完全没有标签的小计行（对应 tessl.io Excel Subtotal Audit 思路）。
+_FORMULA_RE = re.compile(r"^=\s*(?:SUM|SUBTOTAL|AVERAGE)\s*\(", re.IGNORECASE)
+
+
+def _has_summary_formula(cells: list[Any]) -> bool:
+    """整行任意单元格是 SUM/SUBTOTAL/AVERAGE 简单公式 → 精确判定为汇总行。
+
+    仅匹配简单聚合形态；复杂公式交回关键词 / 稀疏行启发式处理。
+    注意读取时用的是原始单元格（data_only=False），公式以 "=SUM(...)" 文本存在。
+    """
+    for v in cells:
+        if isinstance(v, str) and v.startswith("=") and _FORMULA_RE.match(v):
+            return True
+    return False
+
+
 NUM_RE = re.compile(r"^[+\-]?[\d,，]*\.?\d+(?:[eE][+\-]?\d+)?$")
 
 
@@ -611,8 +629,35 @@ def read_grid(path: Path, sheet: str | None) -> tuple[list[list[Any]], dict]:
     return grid, meta
 
 
+def read_formula_grid(path: Path, sheet: str | None) -> list[list[Any]] | None:
+    """用 data_only=False 读出「公式原文」网格，供公式信号精确识别小计行。
+
+    profile 用 data_only=True 读的是计算值，但小计行若是 =SUM() 公式、
+    且标签为空或被拆到后面列时，仅靠关键词会漏。这里单独抓一层公式字符串。
+    CSV 无公式、或没有 openpyxl 时返回 None，调用方据此退化到关键词判定。
+    """
+    if path.suffix.lower() in (".csv", ".tsv", ".txt"):
+        return None
+    if not HAS_OPENPYXL:
+        return None
+    wb = load_workbook(path, data_only=False, read_only=False)
+    ws = wb[sheet] if sheet else wb.active
+    fgrid = [list(row) for row in ws.iter_rows(values_only=True)]
+    while fgrid and all(_is_blank(v) for v in fgrid[-1]):
+        fgrid.pop()
+    return fgrid
+
+
+def _row_has_formula(cells: list[Any] | None) -> bool:
+    if not cells:
+        return False
+    return any(isinstance(v, str) and v.startswith("=") for v in cells)
+
+
 def profile(path: Path, sheet: str | None = None, max_scan: int = 200) -> TableProfile:
     grid, meta = read_grid(path, sheet)
+    # 公式层：仅当源是 xlsx 且装了 openpyxl 时才有意义
+    formula_grid = read_formula_grid(path, sheet) if HAS_OPENPYXL else None
     p = TableProfile(path=str(path), sheet=meta["sheet"], dimensions=meta["dimensions"])
     p.merged_ranges = meta["merged"]
     p.hidden_rows = meta["hidden_rows"]
@@ -637,22 +682,34 @@ def profile(path: Path, sheet: str | None = None, max_scan: int = 200) -> TableP
     data_rows: list[int] = []          # 1-based 行号
     for r in range(data_start, len(grid) + 1):
         row = grid[r - 1]
-        if all(_is_blank(v) for v in row):
+        frow = formula_grid[r - 1] if (formula_grid and len(formula_grid) >= r) else None
+        # 含公式的行不当空行跳过（data_only=True 下公式值是 None，但公式本身是信号）
+        if all(_is_blank(v) for v in row) and not _row_has_formula(frow):
             continue
-        # 首个非空格子的文本
-        first_text = ""
-        for v in row:
-            if not _is_blank(v):
-                first_text = _norm(v)
-                break
+        # 整行所有非空白单元格文本（不再只看首格，修复「华东小计」类漏检）
+        cell_texts = [_norm(v) for v in row if not _is_blank(v)]
+        first_text = cell_texts[0] if cell_texts else ""
         nonempty, text, num = _row_signature(row)
 
-        if _looks_like_footnote(first_text):
-            p.footnote_rows.append({"row": r, "text": first_text[:80]})
+        # 脚注：整行任意单元格命中脚注前缀
+        footnote_hit = next((t for t in cell_texts if _looks_like_footnote(t)), None)
+        if footnote_hit is not None:
+            p.footnote_rows.append({"row": r, "text": footnote_hit[:80]})
             continue
-        if _looks_like_summary(first_text):
-            p.summary_rows.append({"row": r, "label": first_text[:40],
-                                   "reason": "标签含汇总类词汇"})
+        # 汇总：整行任意单元格含汇总类词汇（扫整行，而非仅首格）
+        # 与作者「宁误判一行、不漏判小计行」的哲学一致：中文报表小计标签
+        # 常在后续列（如 A 列"华东" + B 列"华东小计"），首格是分组名，
+        # 只看首格会漏判并让求和翻倍。
+        summary_hit = next((t for t in cell_texts if _looks_like_summary(t)), None)
+        if summary_hit is not None:
+            p.summary_rows.append({"row": r, "label": summary_hit[:40],
+                                   "reason": "标签含汇总类词汇（整行扫描）"})
+            continue
+        # 公式信号：整行任意单元格是 SUM/SUBTOTAL/AVERAGE 公式 → 精确判定汇总行
+        # 走公式原文层（frow），能抓住无文字标签、纯 =SUM() 的小计行。
+        if _has_summary_formula(frow if frow is not None else row):
+            p.summary_rows.append({"row": r, "label": (first_text or "公式小计")[:40],
+                                   "reason": "含 SUM/SUBTOTAL/AVERAGE 公式"})
             continue
         # 稀疏行（大部分列空着但有数字）——典型的分区小计
         if num >= 1 and nonempty <= max(2, width // 3):
