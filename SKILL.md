@@ -156,7 +156,7 @@ python3 --version && python3 -c "import openpyxl, pandas" 2>&1
 | 4 **分析** | 结论会不会栽在陷阱里；推到「所以呢」了吗 | `scan_traps.py` |
 | 5 **对账** | 我凭什么说这个数是对的 | `verify_numbers.py` |
 | 6 **交付** | 他拿到之后要怎么用它 | ↓ HTML **直接写** |
-| 7 **验图** | 画错了没有——不是好不好看 | `verify_visual.py`（HTML）<br>`verify_docx.py`（Word） |
+| 7 **验图** | 画错了没有——不是好不好看 | `verify_visual.py`（HTML）<br>`verify_docx.py`（Word）<br>`verify_xlsx.py`（Excel） |
 | 8 **质控** | 算得对，但结论对吗 | 🔴 **另派一个没参与创作的 agent**，见下 |
 
 **参数、输出怎么读、边界情况 → `references/workflow.md`。** 你在第几步读第几步，
@@ -257,6 +257,11 @@ python3 scripts/verify_visual.py 报告.html --shots 自检   # 退出码 1 = �
 **三、跑完仍要自己看一眼截图。** 机器判「画错了没有」，判不了「好不好」——
 每张图能不能独立回答它的标题、有没有该画成图却写成了段落、
 首屏能不能十秒看懂结论。这三件事没有脚本替得了。
+
+**四、交什么格式就跑哪道闸门。** HTML / deck 跑 `verify_visual.py`，
+Word 跑 `verify_docx.py`，Excel 跑 `verify_xlsx.py`。
+xlsx 那道拦的是行高裁字、列宽不足显示成 `####`、长文本靠溢出被邻列挡住
+这类**在屏幕上滚过去看不出、打印出来全是**的错，见下文「xlsx 不是导出的副产品」。
 
 各项检查的可信度分级、两个已知盲区、`verify_docx.py` 的
 「跳过 ≠ 通过」和 macOS 的 `HOME` 坑 → `references/workflow.md` 第 7 步。
@@ -467,7 +472,7 @@ CEO 听他自己公司的方法，那种场合不必介绍产品线有哪几条�
 |---|---|
 | **HTML 报告** | **直接写。** 脚本只当参考实现看 |
 | **幻灯片 / PPT** | **不在本 skill 做** → 转 `huashu-design`，见下一节。<br>接不上时兜底 `make_report.py --format deck`，文案口吻见 `references/workflow.md` |
-| `xlsx` Excel 内报告 | 走 `make_report.py --format xlsx`——openpyxl 的图表 API 手写不划算 |
+| `xlsx` Excel 内报告 | **排版自己写，图表走 `make_report.py --format xlsx`**——手写不划算的只有图表 API，合并 / 行高 / 列宽 / 填充 / 数字格式全是三五行代码，而且只有手写才对得上设计计划。<br>**交付前必跑 `verify_xlsx.py`**，方法论见 `references/xlsx-craft.md` |
 | `docx` 六页纸文档 | 走 `make_report.py --format docx`——OOXML 规范复杂。<br>图表以 PNG 内嵌正文（需 playwright，缺了会降级为附录数据表并在文中明说）。<br>**交付前必跑 `verify_docx.py`**，Word 的坑见下 |
 
 ### 幻灯片和 PPT：不在这里做
@@ -477,6 +482,37 @@ CEO 听他自己公司的方法，那种场合不必介绍产品线有哪几条�
 交接要带口径声明、论点结构、已验过的 SVG 三样，**别把原始数据丢给它让它自己算**。
 
 触发条件、交接清单、它装不上时怎么办 → `references/workflow.md`「幻灯片和 PPT」。
+
+### xlsx 不是导出的副产品
+
+模型有个默认动作：HTML 是「设计出来的」，xlsx 是「导出来的」。
+于是同一份分析，HTML 那份有层次有节奏，xlsx 那份是一列黑字。
+**读者打开 xlsx 是因为他要在里面继续动手，这份东西他会看得比 HTML 更久。**
+
+设计计划不用重写一份——Color 的 token 变成字色与填充色、Numerals 变成
+`number_format`、Space 变成行高与列宽、Layout 变成合并区域与冻结窗格。
+
+四个坑，全都在生成端不报错：
+
+**一、报告 sheet 和数据 sheet 的规则几乎相反。** 前者要合并、要 wrap、
+要按内容算行高；后者禁合并、要冻结、要筛选。
+`references/excel-craft.md` 那条「合并单元格会破坏排序筛选」**只管数据 sheet**——
+套到报告正文上，就会得到一份全挤在一列里、靠溢出往右显示的东西，
+而溢出一旦撞上右边有内容的单元格，文字当场被腰斩。
+判据：**这个单元格里的东西，有人会拿去排序吗？** 不会就该合并。
+
+**二、行高必须算，不能从 `16 / 30 / 45` 里挑。** 这是 xlsx 排版最主要的单一错误来源：
+18pt 粗体标题配 16 磅行高，字上下被切；70 字正文 wrap 成三行只给 30 磅，
+底部一整行看不见。算法在 `xlsx-craft.md` 第四节，宁可高几磅也别裁。
+
+**三、数值不设 `number_format` 就会原样显示 `9351342.370000001`。**
+底层值保持精确，小数位交给显示层。
+
+**四、同级别的东西要长得一样。** 七个 13pt 粗体小节标题里有两个用了强调色，
+读者就会以为那两个高一级——他跟的是视觉，不是你的意图。
+
+所以 **xlsx 交付前必跑 `verify_xlsx.py`**，别靠肉眼——
+这几类错在屏幕上滚过去看不出来，打印出来全是。
 
 ### Word 的坑，交给 verify_docx 拦
 
@@ -574,9 +610,10 @@ Word 有四个坑全都在生成端不报错——字体没有 fallback 链、�
 | `scripts/make_report.py` | xlsx / docx 报告（HTML 直接写） | 交付时 |
 | `scripts/verify_visual.py` | HTML 渲染自检：越界 / 重叠 / 遮挡 / 双轴 / 图文数字打架 | 交付之前 |
 | `scripts/verify_docx.py` | Word 自检：字体平台绑定 / 中文缺 eastAsia / 空白页 / 图超版心 / 表头不重复 | 交付之前 |
+| `scripts/verify_xlsx.py` | Excel 自检：行高裁字 / 列宽不足 / 溢出被挡 / 合并吃格 / 数字没格式 / 层级不一致 | 交付之前 |
 
-`profile_table.py`、`verify_numbers.py`、`verify_docx.py` 支持 `--json`，其余是文本输出。
-退出码可用作流水线闸门：三个 `verify_*` 不通过时返回 1。
+`profile_table.py`、`verify_numbers.py`、`verify_docx.py`、`verify_xlsx.py` 支持 `--json`，
+其余是文本输出。退出码可用作流水线闸门：四个 `verify_*` 不通过时返回 1。
 
 **依赖**：核心是纯标准库——不用 pandas、不用绘图库、不联网、不需要 subagent 或沙盒。
 （清洗和分析阶段你当然可以用 pandas。这里说的是**工具自己**没有前置条件，
@@ -586,7 +623,7 @@ Word 有四个坑全都在生成端不报错——字体没有 fallback 链、�
 
 | 谁 | 要什么 | 缺了会怎样 |
 |---|---|---|
-| 读写 `.xlsx`，以及 `make_report.py --format xlsx` | openpyxl | 直接报错退出。<br>（html / deck / docx 三种格式不需要它，docx 是手写 OOXML + zipfile） |
+| 读写 `.xlsx`，`make_report.py --format xlsx`，以及 `verify_xlsx.py` | openpyxl | 直接报错退出。<br>（html / deck / docx 三种格式不需要它，docx 是手写 OOXML + zipfile） |
 | `verify_visual.py` | playwright | **退出码 2，整个不跑**——那是「一项都没验」，不是通过也不是失败。<br>手动开浏览器逐屏看 |
 | `verify_docx.py` 的「空白页」这一项 | LibreOffice + poppler + Pillow | 只跳过这一项并明说「跳过 ≠ 通过」，其余照验 |
 
@@ -598,6 +635,7 @@ Word 有四个坑全都在生成端不报错——字体没有 fallback 链、�
 | 脏数据的形态与修法 | `references/dirty-data.md` |
 | 分析配方库与各自的陷阱 | `references/analysis-recipes.md` |
 | Excel 手艺：现代函数、透视、建模规范、经典坑 | `references/excel-craft.md` |
+| **xlsx 交付物怎么排版**：两种 sheet、合并、行高算法、数字格式 | `references/xlsx-craft.md` |
 | 图表怎么选、怎么不误导 | `references/charts.md` |
 | 洞察怎么挖、报告怎么搭 | `references/insight-report.md` |
 | 设计计划五段、十五条不许长成的样子 | `references/report-styles.md` |
