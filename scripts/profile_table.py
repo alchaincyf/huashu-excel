@@ -40,6 +40,7 @@ import sys
 from collections import Counter
 from dataclasses import dataclass, field, asdict
 from datetime import date, datetime, time
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
@@ -168,6 +169,26 @@ def _is_blank(v: Any) -> bool:
 
 def _is_null_token(s: str) -> bool:
     return s.strip().lower() in NULL_TOKENS
+
+
+def _longest_run(rows: list[int]) -> int:
+    """最长的一段连续行号有多长。用来区分「零星小计」和「连成片」。"""
+    if not rows:
+        return 0
+    best = run = 1
+    for a, b in zip(rows, rows[1:]):
+        run = run + 1 if b == a + 1 else 1
+        best = max(best, run)
+    return best
+
+
+def _fmt_rows(rows: list[int], cap: int = 8) -> str:
+    """行号列表印成人能读的样子。几百个行号铺满屏幕，等于没有报告。"""
+    rows = list(rows)
+    if len(rows) <= cap:
+        return ", ".join(map(str, rows))
+    head = ", ".join(map(str, rows[:cap]))
+    return f"{head} … 等 {len(rows)} 行（第 {rows[0]}–{rows[-1]} 行之间）"
 
 
 def _looks_like_summary(s: str) -> bool:
@@ -449,6 +470,7 @@ def detect_header(grid: list[list[Any]], max_scan: int = 30) -> tuple[list[int],
       2. 它下面紧跟着的行开始出现数字
       3. 标题行的特征是「只有一两个格子有值」（通常还合并了）
     """
+    _HEADER_WARNINGS.clear()
     n = min(len(grid), max_scan)
     title_rows: list[int] = []
     header_rows: list[int] = []
@@ -486,12 +508,58 @@ def detect_header(grid: list[list[Any]], max_scan: int = 30) -> tuple[list[int],
             continue
         break
 
+    # 这一段吃多了会静默删数据，所以宁可判少不判多：
+    # 一列数值格、其余全是文本的数据行（境外票据没有税额、问卷只填了一栏）
+    # 完全符合上面的表头特征，会被一路吃到下一行出现多个数字为止。
+    # 两个反证据，命中任一就退回只认第一行——多认一行数据的代价是体检里多几个脏值，
+    # 看得见；少认一行数据的代价是它从此不存在。
+    if len(header_rows) > 1:
+        why = _header_overrun_reason(grid, header_rows, width)
+        if why:
+            header_rows = header_rows[:1]
+            j = i + 1
+            _HEADER_WARNINGS.append(why)
+
     if not header_rows:
         # 兜底：把第一行当表头
         header_rows = [i + 1] if i < n else [1]
         j = i + 1
 
     return title_rows, header_rows, j + 1
+
+
+# detect_header 退回单行表头时，把原因记在这里，由体检报告打出来。
+_HEADER_WARNINGS: list[str] = []
+
+MAX_HEADER_ROWS = 4  # 见过最深的多级表头是 4 层；再深基本是把数据行当成了表头
+
+
+def _header_overrun_reason(
+    grid: list[list[Any]], header_rows: list[int], width: int
+) -> str:
+    """候选表头里有没有「这根本不是表头」的证据。有就返回一句人话，没有返回空串。"""
+    if len(header_rows) > MAX_HEADER_ROWS:
+        return (
+            f"识别到 {len(header_rows)} 行连续表头，超过 {MAX_HEADER_ROWS} 层——"
+            f"多级表头极少这么深，判断是把数据行当成了表头，已退回只认第 {header_rows[0]} 行。"
+            f"若这张表确实是多级表头，用 --header 手工指定。"
+        )
+    # 表头的每一层里，同一列不会反复出现同一个非空值；数据行会（「进项」重复 31 次）。
+    for col in range(width):
+        seen: dict[str, int] = {}
+        for r in header_rows:
+            row = grid[r - 1]
+            if col >= len(row) or _is_blank(row[col]):
+                continue
+            key = str(row[col]).strip()
+            seen[key] = seen.get(key, 0) + 1
+            if seen[key] >= 3:
+                return (
+                    f"候选表头第 {col + 1} 列里「{key}」重复出现 {seen[key]} 次——"
+                    f"表头的每一层不会自我重复，判断第 {header_rows[1]} 行起已经是数据，"
+                    f"已退回只认第 {header_rows[0]} 行。"
+                )
+    return ""
 
 
 RANGE_RE = re.compile(r"^([A-Z]+)(\d+):([A-Z]+)(\d+)$")
@@ -591,6 +659,14 @@ def read_grid(path: Path, sheet: str | None) -> tuple[list[list[Any]], dict]:
         meta["dimensions"] = f"{len(rows)} 行"
         return rows, meta
 
+    # 扩展名是最不可信的一条线索。中国各家后台导出的 .xls 里，
+    # 真正是 Excel 二进制格式的只占一部分，另一大类根本就是 HTML 表格改了个后缀。
+    kind = _sniff(path)
+    if kind == "ole2":
+        return _read_ole2(path, sheet, meta)
+    if kind == "html":
+        return _read_html_table(path, meta)
+
     if not HAS_OPENPYXL:
         raise SystemExit("读 xlsx 需要 openpyxl：pip install openpyxl")
 
@@ -609,6 +685,107 @@ def read_grid(path: Path, sheet: str | None) -> tuple[list[list[Any]], dict]:
     while grid and all(_is_blank(v) for v in grid[-1]):
         grid.pop()
     return grid, meta
+
+
+def _sniff(path: Path) -> str:
+    """看前几个字节，别信扩展名。
+
+    返回 ole2（Excel 97-2003 二进制）/ html（表格改了个后缀）/ zip（真 xlsx）/ unknown。
+    """
+    with path.open("rb") as fh:
+        head = fh.read(1024)
+    if head[:4] == b"\xd0\xcf\x11\xe0":
+        return "ole2"
+    if head[:4] == b"PK\x03\x04":
+        return "zip"
+    probe = head[:512].lower()
+    if b"<table" in probe or b"<html" in probe or probe.lstrip()[:1] == b"<":
+        return "html"
+    return "unknown"
+
+
+def _read_ole2(path: Path, sheet: str | None, meta: dict) -> tuple[list[list[Any]], dict]:
+    """Excel 97-2003 的二进制格式。openpyxl 不支持，只能靠 xlrd。"""
+    try:
+        import xlrd  # type: ignore
+    except ImportError:
+        raise SystemExit(
+            f"{path.name} 是 Excel 97-2003 二进制格式（.xls），openpyxl 读不了。\n"
+            f"装 xlrd 即可：pip install xlrd\n"
+            f"或者用 Excel / LibreOffice 另存为 .xlsx 再跑。"
+        )
+    book = xlrd.open_workbook(str(path))
+    ws = book.sheet_by_name(sheet) if sheet else book.sheet_by_index(0)
+    meta["sheet"] = ws.name
+    meta["all_sheets"] = book.sheet_names()
+    meta["dimensions"] = f"{ws.nrows} 行 x {ws.ncols} 列"
+    meta["source"] = "xls(ole2)"
+    # xlrd 认得合并区，格式是 (行首, 行尾, 列首, 列尾) 且右开；转成 A1:B2 的写法
+    meta["merged"] = [
+        f"{get_column_letter(c0 + 1)}{r0 + 1}:{get_column_letter(c1)}{r1}"
+        for r0, r1, c0, c1 in getattr(ws, "merged_cells", [])
+    ]
+    grid = [[ws.cell_value(r, c) for c in range(ws.ncols)] for r in range(ws.nrows)]
+    while grid and all(_is_blank(v) for v in grid[-1]):
+        grid.pop()
+    return grid, meta
+
+
+class _TableGrab(HTMLParser):
+    """把第一张 <table> 抠成二维数组。只认 tr/td/th，忽略其余标签。"""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.rows: list[list[str]] = []
+        self._row: list[str] | None = None
+        self._cell: list[str] | None = None
+
+    def handle_starttag(self, tag: str, attrs: list) -> None:
+        if tag == "tr":
+            self._row = []
+        elif tag in ("td", "th") and self._row is not None:
+            self._cell = []
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in ("td", "th") and self._cell is not None and self._row is not None:
+            self._row.append("".join(self._cell).strip())
+            self._cell = None
+        elif tag == "tr" and self._row is not None:
+            self.rows.append(self._row)
+            self._row = None
+
+    def handle_data(self, data: str) -> None:
+        if self._cell is not None:
+            self._cell.append(data)
+
+
+def _read_html_table(path: Path, meta: dict) -> tuple[list[list[Any]], dict]:
+    """后台导出最常见的一种伪装：HTML 表格，存成 .xls 骗 Excel 打开。"""
+    raw = path.read_bytes()
+    for enc in ("utf-8-sig", "utf-8", "gb18030", "utf-16"):
+        try:
+            text = raw.decode(enc)
+            meta["encoding"] = enc
+            break
+        except UnicodeDecodeError:
+            continue
+    else:  # pragma: no cover
+        text = raw.decode("utf-8", errors="replace")
+        meta["encoding"] = "utf-8(replace)"
+    g = _TableGrab()
+    g.feed(text)
+    rows = [r for r in g.rows if r]
+    if not rows:
+        raise SystemExit(
+            f"{path.name} 的内容是 HTML 而不是 Excel（扩展名骗人），但里面没找到 <table>。"
+        )
+    meta["sheet"] = path.name
+    meta["source"] = "html(伪装成 xls)"
+    meta["dimensions"] = f"{len(rows)} 行"
+    width = max(len(r) for r in rows)
+    for r in rows:
+        r.extend([""] * (width - len(r)))
+    return rows, meta
 
 
 def profile(path: Path, sheet: str | None = None, max_scan: int = 200) -> TableProfile:
@@ -635,6 +812,7 @@ def profile(path: Path, sheet: str | None = None, max_scan: int = 200) -> TableP
 
     # ── 扫数据区，挑出汇总行、脚注行 ──────────────────────────────
     data_rows: list[int] = []          # 1-based 行号
+    sparse_rows: list[dict] = []       # 待判定：零星的是小计，连成片的是并排子表
     for r in range(data_start, len(grid) + 1):
         row = grid[r - 1]
         if all(_is_blank(v) for v in row):
@@ -654,12 +832,29 @@ def profile(path: Path, sheet: str | None = None, max_scan: int = 200) -> TableP
             p.summary_rows.append({"row": r, "label": first_text[:40],
                                    "reason": "标签含汇总类词汇"})
             continue
-        # 稀疏行（大部分列空着但有数字）——典型的分区小计
+        # 稀疏行（大部分列空着但有数字）——典型的分区小计。
+        # 先只记下来，等扫完再判：小计行是零星散布的，如果它们连成一大片，
+        # 那就不是小计，是这张表右半边比左半边短（并排放了好几个子表）。
         if num >= 1 and nonempty <= max(2, width // 3):
-            p.summary_rows.append({"row": r, "label": first_text[:40],
-                                   "reason": "大部分列为空但含数字，疑似小计行"})
+            sparse_rows.append({"row": r, "label": first_text[:40],
+                                "reason": "大部分列为空但含数字，疑似小计行"})
             continue
         data_rows.append(r)
+
+    # 连成片的稀疏行不是小计行
+    longest = _longest_run([s["row"] for s in sparse_rows])
+    total = len(data_rows) + len(sparse_rows)
+    if sparse_rows and (longest >= 10 or (total and len(sparse_rows) / total > 0.3)):
+        first = sparse_rows[0]["row"]
+        p.warnings.append(
+            f"第 {first} 行起有 {len(sparse_rows)} 行「只有左边几列有值」，最长连续 {longest} 行——"
+            f"小计行不会连成这么大一片，多半是这张表并排放了好几个子表、右边那些比左边短。"
+            f"先按空列把子表切开再分别体检，不要当成一张表算。"
+        )
+        data_rows.extend(s["row"] for s in sparse_rows)
+        data_rows.sort()
+    else:
+        p.summary_rows.extend(sparse_rows)
 
     if not data_rows:
         p.warnings.append("没有识别出明细数据行，请人工确认表头位置")
@@ -889,7 +1084,10 @@ def profile(path: Path, sheet: str | None = None, max_scan: int = 200) -> TableP
                 f"{dirty_ws} 个值带首尾空格或全角空格 —— 分组统计时「张伟」和「张伟 」会被算成两个人"
             )
 
-        if nums:
+        # 标识列不做五数概括。上面刚刚写完「它的均值和离群点没有含义」，
+        # 紧接着又印一遍 min/Q1/中位数/均值，是自己打自己的脸——
+        # 而且「税号的均值是 9.1×10^17」这种数印在报告里，读者会当它是个数量。
+        if nums and not col.is_identifier:
             col.stats = five_number(nums)
 
         p.columns.append(col)
@@ -909,19 +1107,21 @@ def profile(path: Path, sheet: str | None = None, max_scan: int = 200) -> TableP
     }
 
     # ── 全表级警告 ──────────────────────────────────────────────────
+    for w in _HEADER_WARNINGS:
+        p.warnings.append(w)
     if p.title_rows:
         p.warnings.append(
-            f"表头不在第 1 行：第 {', '.join(map(str, p.title_rows))} 行是标题/说明，"
-            f"真表头在第 {', '.join(map(str, p.header_rows))} 行。"
+            f"表头不在第 1 行：第 {_fmt_rows(p.title_rows)} 行是标题/说明，"
+            f"真表头在第 {_fmt_rows(p.header_rows)} 行。"
             f"直接 pd.read_excel() 会把标题当成列名。"
         )
     if p.multi_level_header:
         p.warnings.append(
-            f"两级及以上表头（第 {', '.join(map(str, p.header_rows))} 行）。"
+            f"两级及以上表头（第 {_fmt_rows(p.header_rows)} 行）。"
             f"用 header={p.read_hint['pandas_header_arg']} 读，否则下级表头会掉进数据区。"
         )
     if p.summary_rows:
-        rows_s = ", ".join(str(r["row"]) for r in p.summary_rows)
+        rows_s = _fmt_rows([r["row"] for r in p.summary_rows])
         p.warnings.append(
             f"发现 {len(p.summary_rows)} 个汇总/小计行（第 {rows_s} 行）混在数据区。"
             f"不排除的话，求和会把总计再加一遍。"
@@ -929,7 +1129,7 @@ def profile(path: Path, sheet: str | None = None, max_scan: int = 200) -> TableP
     if p.duplicate_rows:
         p.warnings.append(
             f"{len(p.duplicate_rows)} 行与前面完全重复（第 "
-            f"{', '.join(str(r['row']) for r in p.duplicate_rows)} 行）。"
+            f"{_fmt_rows([r['row'] for r in p.duplicate_rows])} 行）。"
             f"先确认是真实重复业务还是粘贴事故。"
         )
     if p.merged_in_data:
