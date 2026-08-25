@@ -17,16 +17,18 @@ HTML 有 verify_visual.py、Word 有 verify_docx.py、数字有 verify_numbers.p
 
 检查项（机器可判的事实，不判好看不好看）
   FAIL  行高装不下 wrap 后的文本
+  FAIL  合并区域开了 wrap 却没配够行高（Excel 不给合并单元格自动行高）
   FAIL  数值按 number_format 渲染后宽于列宽（会变 ####）
   FAIL  长文本靠溢出显示，但右邻单元格有值
   FAIL  合并区域内除左上角外还有非空单元格
   FAIL  冻结窗格冻的是空行
+  WARN  wrap 行数正卡在换行边界上，估算不可靠——请人工确认
   WARN  浮点数没设 number_format
   WARN  长文本既没合并也没 wrap（右邻为空，只是溢出）
   WARN  数据表够长却没冻结表头
   WARN  同级标题（同字号同粗细）字体颜色不一致
   WARN  数据 sheet 裸奔：没列宽、没冻结、表头与正文无差别
-  WARN  数值被显式设成左/居中对齐
+  WARN  数值被显式设成左/居中对齐（孤立的大字号 KPI 除外）
 
 用法
     python3 verify_xlsx.py 报告.xlsx
@@ -68,10 +70,34 @@ DEFAULT_COL_WIDTH = 8.43   # Excel 默认列宽（单位：基准字号下的字
 DEFAULT_ROW_HEIGHT = 15.0  # Excel 默认行高（磅）
 
 CJK_WIDTH = 2.0            # 全角字符宽度 = 2 个单位，ASCII = 1
-# 单行占的磅数 ≈ 字号 × 1.35。references/xlsx-craft.md 的生成侧算法用 1.4
-# 外加 2 磅内边距——那是刻意的：生成时宁可高一点（多几磅只是留白），
-# 验收时宁可低一点（阈值松才不会误报）。两个数字站在同一个估算的两侧。
-LINE_HEIGHT_RATIO = 1.35
+
+# ── 行高模型：闸门自己的，不复用生成侧的 ──────────────────────────
+# 这里曾经写着「本脚本用 1.35、生成侧用 1.4，两个数字站在同一个估算的两侧」。
+# **那句话是错的，已被三场压测里的两场独立推翻**：闸门跑到 0 FAIL 之后，
+# 把 xlsx 转成 PDF 一看，报告 sheet 仍有正文末行被裁。
+# 原因不是系数填 1.35 还是 1.62，是**验收方在用生成方的模型验生成方的产物**——
+# 模型错了，两边的余量一起错，闸门永远发现不了。
+#
+# 所以这一段是独立重写的，三点和生成侧不一样：
+#   1. 系数按「这一格里有没有中日韩字符」分档，不是一个常数。
+#      中文字体（PingFang SC 实测 asc-desc+leading = 字号 × 1.400，
+#      Microsoft YaHei 同量级）比西文字体高，混用一个数必然错一边。
+#   2. **不给生成侧的 2 磅内边距记账**——文字本身就得装得下，
+#      padding 是余量不是容量。
+#   3. 行数不再算一个数，算一个区间（见 WRAP_BAND）。行数是阶跃的：
+#      文本 69 个宽度单位撞上 68.5 单位的容量，就会少算一整行，
+#      「宁可高一点」只作用在高度上，救不了行数算少。
+#      落在边界带里的单元格单独报 WARN——**承认不确定比假装确定有用**。
+#   4. 小字号有个行高地板，见 MIN_ROW_HEIGHT_PT。
+#
+# 这几个比例是量出来的：造一批不合并的 wrap 单元格（不合并才触发自动行高），
+# soffice --convert-to xlsx 转一遍，再把它算出的 row height 读回来。
+# 实测中文每行 ÷ 字号 = 1.33（16pt）到 1.42（10pt），取上界。
+VERIFY_LINE_RATIO_CJK = 1.42   # 含中日韩字符的单元格：单行 ≈ 字号 × 1.42
+VERIFY_LINE_RATIO_LATIN = 1.30  # 纯西文单元格
+WRAP_BAND = 0.08           # 容量的不确定带 ±8%：乐观容量 ×1.08，保守容量 ×0.92
+BOLD_WIDTH_FACTOR = 1.08   # 粗体宽约 8%。实测粗体不改变行高，只让文字更早换行，
+                           # 所以它只乘在宽度上，不乘在高度上——乘两次是重复计算
 
 ROW_HEIGHT_TOL = 1.08      # 需要的行高超出实际 8% 以内不报
 ROW_SHORTFALL_MIN_PT = 2.5     # 且至少差这么多磅才报
@@ -84,6 +110,15 @@ FLOAT_DECIMALS_MAX = 2     # 浮点数超过这么多位小数又没设格式 �
 TABLE_MIN_ROWS = 30        # 超过这么多行的数据表才要求冻结表头
 HEADING_MIN_SZ = 12.0      # 字号到这个数且加粗，才算「标题」，才查颜色一致性
 HEADING_MIN_GROUP = 3      # 同级标题至少这么多个，才有「一致性」可言
+
+# KPI 形状：一个孤立的大字号数值，上面或下面紧贴一个小字号标签，
+# 按 xlsx-craft.md 第三节它和标签共用同一个合并宽度、左对齐才对得齐。
+# 「数值要右对齐」那一条本来的目标是「一列上下相邻的数字能竖着扫」，
+# 孤立的 KPI 不在射程内，所以识别到这个形状就不报对齐那一项。
+KPI_MIN_SZ = 14.0          # KPI 数值至少这么大
+KPI_SIZE_RATIO = 1.3       # 且至少是本 sheet 正文常见字号的 1.3 倍
+KPI_LABEL_SZ_RATIO = 0.85  # 紧邻的标签字号要明显更小，才算「标签 + 数值」一对
+KPI_MAX_COL_NUMS = 3       # 同列里别的数值不超过这么多个，否则它是「一列数字」
 
 COLLAPSE_AT = 3            # 同一 sheet 同一列同一类问题超过这么多条，折叠成一行
 CROSS_SHEET_AT = 3         # 同一类问题横跨这么多个 sheet，再折一层
@@ -132,6 +167,32 @@ def wrapped_lines(text: str, cap: float) -> int:
     for seg in str(text).split("\n"):
         n += max(1, math.ceil(disp_width(seg) / cap))
     return max(1, n)
+
+
+def line_height(text: str, font_sz: float) -> float:
+    """单行占多少磅。含中日韩字符的按中文字体的行距算，纯西文按西文的。"""
+    ratio = (VERIFY_LINE_RATIO_CJK
+             if any(unicodedata.east_asian_width(ch) in _FULLWIDTH for ch in str(text))
+             else VERIFY_LINE_RATIO_LATIN)
+    return font_sz * ratio
+
+
+# 注：自动行高（不设 height 时渲染引擎给的值）不等于「文字需要的高度」。
+# 实测 9pt 单行的自动行高是 16.40 磅，但把行高压到 12.0 磅，文字仍然完整显示
+# ——那 4.4 磅是留白不是内容。所以这里不设「最小行高地板」，
+# 按 字号 × ratio 判断即可。别被自动行高的数值骗去加一条地板，会造出一堆误报。
+
+
+def wrap_estimate(text: str, total_width: float, font_sz: float, bold: bool):
+    """返回 (n_min, n_max, line_h)——行数的乐观值与保守值。
+
+    两个值不一样，就说明这段文字正卡在换行边界上：容量差 8%（字体度量、
+    粗体、标点压缩都在这个量级里）就会多出或少掉一整行。
+    这种时候闸门不装作知道答案，它报「不确定」。"""
+    base = capacity(total_width, font_sz) / (BOLD_WIDTH_FACTOR if bold else 1.0)
+    n_min = wrapped_lines(text, base * (1.0 + WRAP_BAND))
+    n_max = wrapped_lines(text, base * (1.0 - WRAP_BAND))
+    return n_min, n_max, line_height(text, font_sz)
 
 
 # ── number_format 渲染估算 ───────────────────────────────────────
@@ -279,6 +340,8 @@ class Issue:
 
 KIND_LABEL = {
     "row_height": "行高装不下 wrap 文本",
+    "merge_no_height": "合并区域 wrap 却没配够行高",
+    "wrap_edge": "wrap 行数卡在换行边界",
     "num_width": "数字列宽不足",
     "blocked": "长文本被右邻挡住",
     "overflow": "长文本靠溢出显示",
@@ -392,14 +455,40 @@ def check_sheet(ws, raw_coords: set[str], freeze_min_rows: int):
         if isinstance(c.value, str) and c.font.b and sz >= HEADING_MIN_SZ:
             headings[(sz, True)].append(c)
 
-    # ① 行高装不下 wrap 后的文本
+    def row_h(r: int):
+        """这一行显式设过的行高；没设过返回 None。"""
+        dim = ws.row_dimensions.get(r) if hasattr(ws.row_dimensions, "get") else None
+        return getattr(dim, "height", None) if dim is not None else None
+
+    def height_verdict(text, total_w, sz, bold, avail, explicit):
+        """行高够不够。返回 (verdict, n_min, n_max, line_h, need_min, need_max)。
+        verdict ∈ {"ok", "short", "edge"}：
+          short = 连乐观估计都装不下，确定被裁
+          edge  = 乐观估计装得下、保守估计装不下，卡在换行边界上，不确定"""
+        n_min, n_max, lh = wrap_estimate(text, total_w, sz, bold)
+        need_min, need_max = n_min * lh, n_max * lh
+        short = need_min - avail
+        if (need_min > avail * ROW_HEIGHT_TOL
+                and short >= max(ROW_SHORTFALL_MIN_PT, ROW_SHORTFALL_MIN_FRAC * lh)):
+            v = "short"
+        elif n_max > n_min and need_max > avail:
+            # 只有真的多出一行时才算边界——n_min == n_max 说明行数是稳的，
+            # 那就只剩高度一个变量，上面那一支已经判过了。
+            v = "edge"
+        elif not explicit and need_min > avail * ROW_HEIGHT_TOL:
+            v = "short"        # 没设行高的合并区域，容差再松也得报
+        else:
+            v = "ok"
+        return v, n_min, n_max, lh, need_min, need_max
+
+    # ① 行高装不下 wrap 后的文本（非合并单元格）
     #    真实故障：make_report.py 按「46 个字一行 × 15 磅」估行高，没算字号，
     #    18 磅的大标题塞进 16 磅的行，上下各削掉一截。
-    #    只在行高被显式设过时才判——没设的行 Excel 会自动撑开，不构成问题。
+    #    只在行高被显式设过时才判——**非合并**单元格没设行高时 Excel 会自动
+    #    撑开，不构成问题。合并单元格不会，那是下面第 ①b 项。
     if has_widths:
         for r in range(1, last_row + 1):
-            dim = ws.row_dimensions.get(r) if hasattr(ws.row_dimensions, "get") else None
-            h = getattr(dim, "height", None) if dim is not None else None
+            h = row_h(r)
             if h is None:
                 continue
             worst = None
@@ -408,40 +497,96 @@ def check_sheet(ws, raw_coords: set[str], freeze_min_rows: int):
                     continue
                 if not c.alignment.wrap_text:
                     continue
-                mr = merge_of.get((c.row, c.column))
-                if mr is not None:
-                    if mr.min_row != mr.max_row:
-                        continue           # 跨行合并，行高不能单独归给这一行
-                    total_w = sum(cw(i) for i in range(mr.min_col, mr.max_col + 1))
-                    if (c.row, c.column) != (mr.min_row, mr.min_col):
-                        continue
-                else:
-                    total_w = cw(c.column)
+                if (c.row, c.column) in merge_of:
+                    continue               # 合并区域统一在 ①b 里算
                 sz = float(c.font.sz or DEFAULT_FONT_SZ)
-                line_h = sz * LINE_HEIGHT_RATIO
-                n = wrapped_lines(c.value, capacity(total_w, sz))
-                need = n * line_h
-                if worst is None or need > worst[0]:
-                    worst = (need, n, line_h, c)
+                res = height_verdict(c.value, cw(c.column), sz,
+                                     bool(c.font.b), float(h), True)
+                if res[0] == "ok":
+                    continue
+                if worst is None or res[4] > worst[0][4]:
+                    worst = (res, c, sz)
             if worst is None:
                 continue
-            need, n, line_h, c = worst
-            short = need - float(h)
-            if (need > float(h) * ROW_HEIGHT_TOL
-                    and short >= max(ROW_SHORTFALL_MIN_PT, ROW_SHORTFALL_MIN_FRAC * line_h)):
-                sz = float(c.font.sz or DEFAULT_FONT_SZ)
-                if n == 1:
-                    why = (f"{sz:.0f} 磅的字至少要 {line_h:.1f} 磅行高，"
+            (verdict, n_min, n_max, lh, need_min, need_max), c, sz = worst
+            if verdict == "short":
+                short = need_min - float(h)
+                if n_min == 1:
+                    why = (f"{sz:.0f} 磅的字至少要 {lh:.1f} 磅行高，"
                            f"实际只有 {float(h):.0f} 磅 → 上下被削掉一截")
                 else:
-                    why = (f"文本 wrap 后需 {n} 行 × {line_h:.1f} 磅 = {need:.1f} 磅，"
+                    why = (f"文本 wrap 后需 {n_min} 行 × {lh:.1f} 磅 = {need_min:.1f} 磅，"
                            f"实际行高 {float(h):.0f} 磅 → 底部约 "
-                           f"{short / line_h:.1f} 行被裁")
+                           f"{short / lh:.1f} 行被裁")
                 fails.append(Issue(
                     "FAIL", "row_height", ws.title, f"第 {r} 行", c.coordinate,
                     f"「{ws.title}」第 {r} 行（{c.coordinate}）：{why}。"
-                    f"建议设为 {math.ceil(need)}",
+                    f"建议设为 {math.ceil(need_min)}",
                     sort=short))
+            else:
+                warns.append(Issue(
+                    "WARN", "wrap_edge", ws.title, f"第 {r} 行", c.coordinate,
+                    f"「{ws.title}」第 {r} 行（{c.coordinate}）：这段文字正卡在换行边界上——"
+                    f"按容量算是 {n_min} 行，容量差 8% 就变成 {n_max} 行；"
+                    f"真是 {n_max} 行就要 {need_max:.0f} 磅，而实际行高只有 {float(h):.0f} 磅。"
+                    f"**估算在这里不可靠，请人工确认**；"
+                    f"想省事就把行高设到 {math.ceil(need_max)}",
+                    sort=need_max - float(h)))
+
+    # ①b 合并区域开了 wrap 却没配够行高
+    #     **Excel 对合并单元格不做自动行高**——只有非合并单元格会自己撑开。
+    #     所以「合并到全宽 + wrap_text=True + 不设行高」在真 Excel 里必然裁字，
+    #     而这件事有三层防线同时失守：craft 文档教你合并也教你算行高，
+    #     但没写「一旦合并，行高就从可选变成必填」；闸门以前跳过不设行高的行；
+    #     第八节推荐的 soffice 转 PDF 也照不出来——**LibreOffice 会替合并单元格
+    #     撑开行高，真 Excel 不会**。三层都对「照着规范做、只漏了一节」的人失效。
+    for mr in merged:
+        c = ws.cell(row=mr.min_row, column=mr.min_col)
+        if not isinstance(c.value, str) or not c.alignment.wrap_text:
+            continue
+        rows = list(range(mr.min_row, mr.max_row + 1))
+        heights = [row_h(r) for r in rows]
+        explicit = all(h is not None for h in heights)
+        avail = sum(float(h) if h is not None else dflt_h for h in heights)
+        total_w = sum(cw(i) for i in range(mr.min_col, mr.max_col + 1))
+        sz = float(c.font.sz or DEFAULT_FONT_SZ)
+        verdict, n_min, n_max, lh, need_min, need_max = height_verdict(
+            c.value, total_w, sz, bool(c.font.b), avail, explicit)
+        if verdict == "ok":
+            continue
+        span = "这一行" if len(rows) == 1 else f"这 {len(rows)} 行"
+        if verdict == "short" and not explicit:
+            fails.append(Issue(
+                "FAIL", "merge_no_height", ws.title, str(mr), c.coordinate,
+                f"「{ws.title}」合并区域 {mr} 开了 wrap_text 却没显式设行高，"
+                f"{span}只有默认的 {avail:.0f} 磅，而文本要 {n_min} 行 × {lh:.1f} 磅 = "
+                f"{need_min:.1f} 磅。**Excel 不给合并单元格做自动行高**"
+                f"（只有非合并单元格才会自己撑开），所以这段文字在真 Excel 里必然被裁——"
+                f"LibreOffice 转 PDF 看不出来，它会替合并单元格撑开。"
+                f"设 ws.row_dimensions[{mr.min_row}].height = {math.ceil(need_min)}",
+                sort=need_min - avail))
+        elif verdict == "short":
+            short = need_min - avail
+            if n_min == 1:
+                why = (f"{sz:.0f} 磅的字至少要 {lh:.1f} 磅行高，"
+                       f"实际只有 {avail:.0f} 磅 → 上下被削掉一截")
+            else:
+                why = (f"文本 wrap 后需 {n_min} 行 × {lh:.1f} 磅 = {need_min:.1f} 磅，"
+                       f"实际行高 {avail:.0f} 磅 → 底部约 {short / lh:.1f} 行被裁")
+            fails.append(Issue(
+                "FAIL", "row_height", ws.title, f"第 {mr.min_row} 行", c.coordinate,
+                f"「{ws.title}」第 {mr.min_row} 行（合并区域 {mr}）：{why}。"
+                f"建议设为 {math.ceil(need_min)}",
+                sort=short))
+        else:
+            warns.append(Issue(
+                "WARN", "wrap_edge", ws.title, f"第 {mr.min_row} 行", c.coordinate,
+                f"「{ws.title}」合并区域 {mr}：这段文字正卡在换行边界上——"
+                f"按容量算是 {n_min} 行，容量差 8% 就变成 {n_max} 行；"
+                f"真是 {n_max} 行就要 {need_max:.0f} 磅，而实际行高只有 {avail:.0f} 磅。"
+                f"**估算在这里不可靠，请人工确认**；"
+                f"想省事就把行高设到 {math.ceil(need_max)}",
+                sort=need_max - avail))
 
     # ② 数字列宽不足 —— Excel 会整格显示成 ####，一个数字都看不见
     #    真实故障场景：千分位 + 货币符号 + 两位小数把 12 个字符塞进 10 宽的列。
@@ -646,11 +791,43 @@ def check_sheet(ws, raw_coords: set[str], freeze_min_rows: int):
     # ⑩ 数值被显式设成左/居中对齐
     #    只报显式设过的：openpyxl 里数值默认（horizontal=None）就是右对齐，
     #    把 None 也算进来会让每一张没排过版的表全线飘红。
+    #
+    #    **KPI 除外。** 这一项本来的目标是「一列上下相邻的数字要能竖着扫」，
+    #    孤立的大字号 KPI 不在射程内：xlsx-craft.md 第三节明确要求 KPI 的标签
+    #    与数值共用同一个合并宽度、视觉上对齐，那种情况下右对齐反而是错的
+    #    （四个 KPI 不在同一列、量纲各不相同，右对齐只会让它们和各自的标签错位）。
+    #    闸门和方法论打架时，先改闸门。
+    body_sz = sizes.most_common(1)[0][0] if sizes else DEFAULT_FONT_SZ
+    nums_per_col: Counter = Counter()
+    for c in cells:
+        if isinstance(c.value, (int, float)) and not isinstance(c.value, bool):
+            nums_per_col[c.column] += 1
+
+    def looks_like_kpi(c) -> bool:
+        """KPI 形状：在合并区域里、字号明显大于正文、上方或下方紧邻一个
+        小字号标签、而且不处在一列连续的数值中。四条全中才算。"""
+        mr = merge_of.get((c.row, c.column))
+        if mr is None or (c.row, c.column) != (mr.min_row, mr.min_col):
+            return False
+        sz = float(c.font.sz or DEFAULT_FONT_SZ)
+        if sz < KPI_MIN_SZ or sz < body_sz * KPI_SIZE_RATIO:
+            return False
+        if nums_per_col.get(c.column, 0) - 1 > KPI_MAX_COL_NUMS:
+            return False
+        for r in (mr.min_row - 1, mr.max_row + 1):
+            if r < 1:
+                continue
+            nb = ws.cell(row=r, column=mr.min_col)
+            if (isinstance(nb.value, str) and nb.value.strip()
+                    and float(nb.font.sz or DEFAULT_FONT_SZ) <= sz * KPI_LABEL_SZ_RATIO):
+                return True
+        return False
+
     for c in cells:
         if not isinstance(c.value, (int, float)) or isinstance(c.value, bool):
             continue
         h = c.alignment.horizontal
-        if h in ("left", "center"):
+        if h in ("left", "center") and not looks_like_kpi(c):
             warns.append(Issue(
                 "WARN", "num_align", ws.title, "数值对齐", c.coordinate,
                 f"「{ws.title}」{c.coordinate}：数值被显式设成 {h} 对齐，"
@@ -760,6 +937,60 @@ def self_test() -> int:
         n.number_format = "#,##0.00"
         ws.freeze_panes = "A3"
 
+    def case_merge_no_height(ws):
+        # 缺陷二的最小复现：合并到全宽 + wrap + **不设行高**。
+        # Excel 不给合并单元格自动行高，这段字在真 Excel 里必然被裁；
+        # 而 LibreOffice 会替它撑开，转 PDF 自检照不出来。
+        for col in "BCDEFG":
+            ws.column_dimensions[col].width = 14
+        c = ws.cell(row=2, column=2, value="正" * 70)
+        c.alignment = Alignment(wrap_text=True, vertical="top")
+        ws.merge_cells("B2:G2")
+
+    def case_wrap_edge(ws):
+        # 文本宽度正好卡在「一行装得下还是装不下」的边界上：
+        # 容量差 8% 就多出一整行，行高只按少的那个算。
+        ws.column_dimensions["B"].width = 40
+        c = ws.cell(row=2, column=2, value="边" * 39)
+        c.font = Font(size=11)
+        c.alignment = Alignment(wrap_text=True)
+        ws.row_dimensions[2].height = 32
+
+    def case_num_align(ws):
+        # 一列上下相邻的数字被设成左对齐——这一项该报
+        ws.column_dimensions["B"].width = 14
+        for i in range(5):
+            c = ws.cell(row=2 + i, column=2, value=1000 + i)
+            c.alignment = Alignment(horizontal="left")
+
+    def case_kpi_left(ws):
+        # 缺陷三：KPI 形状（合并区里的大字号数值 + 上下紧邻小字号标签），
+        # 按 xlsx-craft.md 第三节它就该和标签共用宽度左对齐，不该被骂
+        for col in "BCDE":
+            ws.column_dimensions[col].width = 16
+        for r, txt in ((2, "花火达标率"), (4, "口径见下节")):
+            for col, label in ((2, txt), (4, txt)):
+                lc = ws.cell(row=r, column=col, value=label)
+                lc.font = Font(size=9)
+                lc.alignment = Alignment(horizontal="left")
+        for col in (2, 4):
+            v = ws.cell(row=3, column=col, value=0.459)
+            v.font = Font(size=16, bold=True)
+            v.alignment = Alignment(horizontal="left")
+            v.number_format = "0.0%"
+        for r in (2, 3, 4):
+            ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=3)
+            ws.merge_cells(start_row=r, start_column=4, end_row=r, end_column=5)
+        ws.row_dimensions[2].height = 14
+        ws.row_dimensions[3].height = 26
+        ws.row_dimensions[4].height = 14
+
+    def case_plain_wrap_no_height(ws):
+        # 非合并单元格 + wrap + 不设行高：Excel 会自动撑开，**不该报**
+        ws.column_dimensions["B"].width = 40
+        c = ws.cell(row=2, column=2, value="正" * 60)
+        c.alignment = Alignment(wrap_text=True)
+
     def case_merge_eat(ws):
         ws.column_dimensions["A"].width = 20
         ws.column_dimensions["B"].width = 20
@@ -789,10 +1020,13 @@ def self_test() -> int:
 
     cases = [
         ("行高装不下 wrap 文本", case_row_height, "row_height", "FAIL"),
+        ("合并 + wrap + 不设行高", case_merge_no_height, "merge_no_height", "FAIL"),
+        ("wrap 行数卡在换行边界", case_wrap_edge, "wrap_edge", "WARN"),
         ("数字列宽不足会显示 ####", case_num_width, "num_width", "FAIL"),
         ("长文本被右邻挡住", case_blocked, "blocked", "FAIL"),
         ("冻结窗格冻在空行", case_freeze_blank, "freeze_blank", "FAIL"),
         ("同级标题字色不一致", case_heading_color, "heading_color", "WARN"),
+        ("一列数字被设成左对齐", case_num_align, "num_align", "WARN"),
     ]
     for name, fn, kind, level in cases:
         f, w, _, _ = verify(build(fn), TABLE_MIN_ROWS)
@@ -800,6 +1034,18 @@ def self_test() -> int:
         hit = any(i.kind == kind for i in pool)
         print(f"  {'✓' if hit else '✗'} {name}")
         ok = ok and hit
+
+    # 反面用例：这些写法是对的，报了就是误报——误报是这类脚本的头号敌人
+    neg_cases = [
+        ("KPI 左对齐不误报", case_kpi_left, "num_align"),
+        ("非合并 wrap 不设行高不误报", case_plain_wrap_no_height, "merge_no_height"),
+    ]
+    for name, fn, kind in neg_cases:
+        f, w, _, _ = verify(build(fn), TABLE_MIN_ROWS)
+        bad = [i for i in f + w if i.kind == kind]
+        print(f"  {'✓' if not bad else '✗'} {name}"
+              + ("" if not bad else "：" + "；".join(i.msg for i in bad)))
+        ok = ok and not bad
 
     f, w, _, _ = verify(build(case_clean), TABLE_MIN_ROWS)
     clean = not f and not w
