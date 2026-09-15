@@ -896,6 +896,10 @@ def profile(path: Path, sheet: str | None = None, max_scan: int = 200) -> TableP
     for c in range(width):
         col = ColumnProfile(index=c, letter=get_column_letter(c + 1),
                             name=names[c] if c < len(names) else get_column_letter(c + 1))
+        # CSV 的每个单元格本来就都是 str，没有「被存成文本」这回事——
+        # 那个判断只对 Excel 这种单元格自带类型的源成立。不做这道闸，
+        # csv.reader 出来的每一列都会被误报成「数字被存成了文本」。
+        typed_cells = path.suffix.lower() not in (".csv", ".tsv", ".txt")
         raws = [grid[r - 1][c] for r in data_rows]
         col.n_total = len(raws)
 
@@ -941,7 +945,7 @@ def profile(path: Path, sheet: str | None = None, max_scan: int = 200) -> TableP
                 nums.append(val)
                 for m in mk:
                     marks[m] += 1
-                if isinstance(raw, str):
+                if typed_cells and isinstance(raw, str):
                     kinds["_number_stored_as_text"] += 1
             else:
                 kinds["text"] += 1
@@ -966,7 +970,7 @@ def profile(path: Path, sheet: str | None = None, max_scan: int = 200) -> TableP
                     nums.append(val)
                     for m in mk:
                         marks[m] += 1
-                    if isinstance(raw_v, str):
+                    if typed_cells and isinstance(raw_v, str):
                         kinds["_number_stored_as_text"] += 1
 
         col.n_unique = len({_norm(v) for v in raws if not _is_blank(v)})
