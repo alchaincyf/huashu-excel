@@ -489,7 +489,12 @@ def detect_header(grid: list[list[Any]], max_scan: int = 30) -> tuple[list[int],
             i += 1
             continue
         # 只有 1-2 个非空且宽度明显不足 → 标题或制表说明
-        if nonempty <= max(2, width // 4) and num == 0:
+        # 守卫：整行填满（nonempty == width）的行不可能是稀疏标题。
+        # 两列表的表头恰好只有 2 个非空格，会被上式误吞成标题行，
+        # 兜底逻辑接着把首行数据当表头——该行从此静默消失（实测：真值
+        # 6,490,420 被报成 5,255,853，差 19.02% 假差异）。nonempty < width
+        # 对 ≥3 列的表恒不触发（nonempty≤2 < width 自动成立），零回归。
+        if nonempty <= max(2, width // 4) and num == 0 and nonempty < width:
             title_rows.append(i + 1)
             i += 1
             continue
