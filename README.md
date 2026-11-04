@@ -126,6 +126,16 @@ npx skills add alchaincyf/huashu-excel
 git clone https://github.com/alchaincyf/huashu-excel <上表里的目录>/huashu-excel
 ```
 
+### DeepSeek Harness 插件
+
+本仓库同时是一个 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）插件。桌面端用户在「插件 → 添加插件」里填 GitHub 仓库地址，或者用命令行（桌面端的 profile 叫 `desktop`，网页版换成 `web`）：
+
+```bash
+dsh plugin --profile desktop add github:alchaincyf/huashu-excel
+```
+
+装完退出 DSH 再打开，插件才会加载。DSH 桌面端自带 Python 和 pandas、openpyxl，不用另装任何东西。卸载：`dsh plugin --profile desktop remove huashu-excel`。
+
 不确定装哪就用上面的 `npx skills add`，它会自己探测。
 也可以完全不装——把 `SKILL.md` 当成一份数据分析的方法论文档直接读。
 

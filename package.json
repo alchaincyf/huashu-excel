@@ -1,6 +1,6 @@
 {
   "name": "huashu-excel",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "花叔数据分析大师：体检脏表、清洗、定口径、算指标、对账、出报告，让算出来的数字经得起追问。",
   "license": "MIT",
   "author": "花叔",

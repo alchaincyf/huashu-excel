@@ -5,7 +5,7 @@ metadata:
   author: "花叔"
   homepage: "https://github.com/alchaincyf"
   repository: "https://github.com/alchaincyf/huashu-excel"
-  version: "1.0.0"
+  version: "1.1.0"
 ---
 
 # 花叔数据分析大师
