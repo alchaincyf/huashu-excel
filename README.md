@@ -134,7 +134,7 @@ git clone https://github.com/alchaincyf/huashu-excel <上表里的目录>/huashu
 dsh plugin --profile desktop add github:alchaincyf/huashu-excel
 ```
 
-装完退出 DSH 再打开，插件才会加载。DSH 桌面端自带 Python 和 pandas、openpyxl，不用另装任何东西。卸载：`dsh plugin --profile desktop remove huashu-excel`。
+命令行装之前，桌面端要先打开过一次，并且完全退出。装完再打开 DSH，插件才会加载。DSH 桌面端自带 Python 和 pandas、openpyxl，不用另装任何东西。卸载：`dsh plugin --profile desktop remove huashu-excel`。
 
 不确定装哪就用上面的 `npx skills add`，它会自己探测。
 也可以完全不装——把 `SKILL.md` 当成一份数据分析的方法论文档直接读。
