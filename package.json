@@ -1,0 +1,28 @@
+{
+  "name": "huashu-excel",
+  "version": "1.0.0",
+  "description": "花叔数据分析大师：体检脏表、清洗、定口径、算指标、对账、出报告，让算出来的数字经得起追问。",
+  "license": "MIT",
+  "author": "花叔",
+  "homepage": "https://github.com/alchaincyf/huashu-excel",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/alchaincyf/huashu-excel.git"
+  },
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "agent-skill"
+  ],
+  "files": [
+    "SKILL.md",
+    "references",
+    "scripts/*.py",
+    "cordis.patch.yml"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

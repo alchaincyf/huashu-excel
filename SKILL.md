@@ -131,6 +131,14 @@ metadata:
 python3 --version && python3 -c "import openpyxl, pandas" 2>&1
 ```
 
+**在 DeepSeek Harness 桌面端里**（工具清单里有 `load_workspace_dependencies`）：先调用它，
+之后所有 `python3` 都换成它返回的 Python 绝对路径。那套 Python 自带 openpyxl、pandas，
+本 skill 的脚本全部够用；不要 `pip install`，也不要去找系统里的 Python——
+用户多半没装，装了也可能缺库。脚本路径写本 skill 目录下 `scripts/` 的绝对路径，
+输出文件一律写进当前工作区。Word / Excel 交付物要看版面时，加载 DSH 自带的
+`office-render` skill 把文件渲染成图再读图；`verify_visual.py` 在桌面端没有 playwright，
+按下文退出码 2 处理（明说没验，请用户在 DSH 侧栏预览里看一眼）。
+
 再看一眼自己的工具清单，重点是有没有能起并行子任务的能力（Task / Agent 这类）。
 它决定第 4 步的多视角和第 8 步的独立质控该怎么做：
 
